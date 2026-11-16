@@ -19,6 +19,20 @@
 .gridActions { display: flex; gap: 10px; align-items: center; flex: none; }
 .gridActions .btn { min-height: 44px; }
 
+/* -- the view switch: Space / Layers / Timeline / Map ---------------------- */
+.gridViewSwitch { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; }
+.gridViewSwitch__label { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); }
+.gridViewSwitch__select {
+  min-height: 44px; padding: 0 30px 0 12px; border: 1px solid var(--line-strong); border-radius: 10px;
+  background: var(--bg-1); color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
+  appearance: none; -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%), linear-gradient(135deg, var(--text-3) 50%, transparent 50%);
+  background-position: calc(100% - 17px) 19px, calc(100% - 12px) 19px;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
+.gridViewSwitch__select:hover { border-color: var(--tool-search); color: var(--text); }
+.gridViewSwitch__select:focus-visible { outline: 2px solid var(--tool-search); outline-offset: 2px; }
+
 /* -- the project's path ----------------------------------------------------- */
 .gridCrumbs { margin: 4px 0 6px; }
 .gridBreadcrumb { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; list-style: none; margin: 0; padding: 0; font-size: 12px; }
@@ -33,6 +47,7 @@
 
 /* -- the two columns ------------------------------------------------------- */
 .gridBody { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 22px; align-items: start; }
+.gridStage { min-width: 0; }
 .gridMap__viewport { position: relative; overflow: auto; max-width: 100%; border: 1px solid var(--line); border-radius: 16px; background: var(--bg-inset); }
 /* The plane is the canvas as it is really painted: a transform does not change
    an element's box, and the viewport must not scroll to that phantom width. */
@@ -46,6 +61,117 @@
     linear-gradient(to bottom, rgb(255 255 255 / 3%) 1px, transparent 1px);
   background-size: 40px 40px;
 }
+
+/* -- Space: the real WebGL2 scene, lazy and only on a capable desktop ------ */
+.gridSpace__viewport {
+  position: relative; box-sizing: border-box; max-width: 100%; overflow: hidden;
+  height: clamp(600px, 72vh, 980px); min-height: 600px;
+  border: 1px solid var(--line); border-radius: 16px; background: rgb(11 14 19);
+}
+.gridSpace__viewport .grid-space-root { border-radius: inherit; }
+.gridSpace__viewport canvas { display: block; width: 100%; height: 100%; }
+.gridSpace__viewport canvas:focus-visible { outline: 2px solid var(--tool-search); outline-offset: -2px; }
+
+/* -- Layers and Timeline: the same scene as a readable document ------------ */
+.gridProjection__viewport {
+  min-width: 0; max-width: 100%; border: 1px solid var(--line); border-radius: 16px; background: var(--bg-1);
+}
+.gridProjection { display: flex; flex-direction: column; gap: 14px; padding: 16px; min-width: 0; }
+.gridProjection__head { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.gridProjection__tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.gridProjection__tab {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--bg-inset);
+  color: var(--text-2); font: inherit; font-size: 12px; cursor: pointer;
+}
+.gridProjection__tab:hover { border-color: var(--tool-search); color: var(--text); }
+.gridProjection__tab[aria-selected=true] { border-color: var(--tool-search); color: var(--text); background: var(--bg-2); }
+.gridProjection__tab:focus-visible, .gridProjection__action:focus-visible,
+.gridProjection__row:focus-visible, .gridProjection__chip:focus-visible { outline: 2px solid var(--tool-search); outline-offset: 2px; }
+.gridProjection__tabCount { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.gridProjection__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.gridProjection__action {
+  min-height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--bg-inset); color: var(--text-2); font: inherit; font-size: 12px; cursor: pointer;
+}
+.gridProjection__action:hover { border-color: var(--tool-search); color: var(--text); }
+.gridProjection__divider { width: 1px; height: 22px; background: var(--line); }
+.gridProjection__count { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.gridProjection__note { margin: 0; font-size: 11px; line-height: 1.5; color: var(--text-3); overflow-wrap: anywhere; }
+.gridProjection__groups { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.gridProjection__group { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.gridProjection__groupHead { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.gridProjection__groupLabel { margin: 0; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); font-weight: 600; }
+.gridProjection__groupCount { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.gridProjection__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.gridProjection__row {
+  box-sizing: border-box; min-height: 44px; padding: 9px 11px; min-width: 0;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--bg-inset);
+  color: var(--text); cursor: pointer; transition: border-color .12s ease, background-color .12s ease;
+}
+.gridProjection__row:hover { border-color: var(--tool-search); background: var(--bg-2); }
+.gridProjection__row--selected { border-color: var(--tool-search); box-shadow: 0 0 0 1px var(--tool-search); }
+.gridProjection__row--related { border-color: rgb(53 195 214 / 60%); }
+.gridProjection__row--child { margin-left: 16px; border-left-color: var(--tool-search); }
+.gridProjection__turn {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 4px 0 0 8px;
+  padding: 6px 0 3px;
+  border-bottom: 1px dashed var(--line);
+}
+.gridProjection__turnLabel {
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.gridProjection__turnCount { font-size: 10px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.gridProjection__row[data-turn] { border-left-color: rgb(53 195 214 / 45%); }
+.gridProjection__row[data-depth="2"] { margin-left: 32px; }
+.gridProjection__row[data-depth="3"] { margin-left: 48px; }
+.gridProjection__row[data-depth="4"] { margin-left: 64px; }
+.gridProjection__row[data-depth="5"] { margin-left: 80px; }
+.gridProjection__row[data-kind="message"] .gridProjection__mark,
+.gridProjection__row[data-kind="operation"] .gridProjection__mark { color: var(--tool-search); }
+.gridProjection__rowMain { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.gridProjection__mark { flex: none; color: var(--text-3); font-size: 12px; line-height: 1.5; }
+.gridProjection__rowBody { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.gridProjection__rowBody > .gridProjection__head { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.gridProjection__kind { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+.gridProjection__state { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-2); }
+.gridProjection__title { font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
+.gridProjection__meta { font-size: 11px; line-height: 1.4; color: var(--text-3); overflow-wrap: anywhere; }
+.gridProjection__related { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.gridProjection__chip {
+  max-width: 100%; min-height: 28px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px;
+  background: none; color: var(--text-2); font: inherit; font-size: 11px; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gridProjection__chip:hover { border-color: var(--tool-search); color: var(--text); }
+.gridProjection__more { font-size: 11px; color: var(--text-3); }
+.gridProjection__open {
+  flex: none; align-self: center; display: inline-flex; align-items: center; min-height: 32px; padding: 0 9px;
+  border: 1px solid var(--line); border-radius: 8px; color: var(--text-2); text-decoration: none; font-size: 11px;
+}
+.gridProjection__open:hover { border-color: var(--tool-search); color: var(--text); }
+.gridProjection__empty { margin: 0; padding: 10px 0; font-size: 12px; color: var(--text-3); }
+.gridProjection__footer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.gridProjection__notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+.gridProjection__panel { display: flex; flex-direction: column; gap: 10px; }
 
 /* -- regions --------------------------------------------------------------- */
 .gridMap__region { position: absolute; box-sizing: border-box; border: 1px solid var(--line-strong); border-radius: 14px; background: rgb(23 26 34 / 55%); }
@@ -167,6 +293,136 @@
 /* Author display rules must not override the browser's hidden attribute. */
 .gridPage [hidden] { display: none !important; }
 
+/* -- focus: one card marked, its relatives lit, the rest stepped back ------ */
+.gridNode.is-selected {
+  z-index: 3;
+  border-color: var(--tool-search);
+  box-shadow: 0 0 0 1px var(--tool-search);
+}
+.gridNode.is-related { border-color: rgb(53 195 214 / 60%); }
+.gridNode.is-dimmed { opacity: .32; }
+.gridMap__edge.is-lit { opacity: .95; stroke-width: 1.4; }
+.gridMap__edge.is-dimmed { opacity: .12; }
+.gridMap__link.is-lit { opacity: .9; stroke-width: 1.4; }
+.gridMap__link.is-dimmed { opacity: .1; }
+
+/* -- the inspector: what the selected card is ------------------------------ */
+.gridInspector { display: flex; flex-direction: column; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.gridInspector__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.gridInspector__title { margin: 0; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--tool-search); font-weight: 600; }
+.gridInspector__close {
+  flex: none; width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg-inset); color: var(--text-2); font-size: 16px; line-height: 1; cursor: pointer;
+}
+.gridInspector__close:hover { border-color: var(--tool-search); color: var(--text); }
+.gridInspector__name { margin: 0; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
+.gridInspector__facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin: 0; font-size: 12px; }
+.gridInspector__fact { display: contents; }
+.gridInspector__term { margin: 0; font-size: 11px; color: var(--text-3); }
+.gridInspector__value { margin: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.gridInspector__open { align-self: flex-start; min-height: 44px; display: inline-flex; align-items: center; padding: 0 14px; text-decoration: none; }
+.gridInspector__section { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.gridInspector__heading { margin: 0; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); font-weight: 600; }
+.gridInspector__note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-3); overflow-wrap: anywhere; }
+.gridInspector__note--off { color: var(--warn); }
+
+/* -- the canonical chat tree: Messages / Executions / Operations ----------- */
+.gridInspector__tree { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.gridInspector__treeGroup { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.gridInspector__treeToggle {
+  display: flex; align-items: baseline; gap: 6px; width: 100%; min-height: 32px;
+  padding: 2px 0; border: 0; background: none; color: inherit; font: inherit;
+  text-align: left; cursor: pointer;
+}
+.gridInspector__treeToggle:focus-visible { outline: 2px solid var(--tool-search); outline-offset: 2px; border-radius: 5px; }
+.gridInspector__caret { flex: none; width: 12px; color: var(--text-3); }
+.gridInspector__treeLabel { flex: 1 1 auto; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); font-weight: 600; }
+.gridInspector__treeCount { flex: none; font-size: 10px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.gridInspector__treeBody { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.gridInspector__treeList { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.gridInspector__treeList--child { margin-top: 4px; padding-left: 8px; border-left: 1px solid var(--line); }
+.gridInspector__treeRow {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px;
+  min-width: 0; padding: 6px 7px; border: 1px solid transparent; border-radius: 8px;
+  font-size: 12px; line-height: 1.4; cursor: pointer;
+}
+.gridInspector__treeRow:hover { border-color: var(--line); background: var(--bg-2); }
+.gridInspector__treeRow[data-selected="true"] { border-color: var(--tool-search); background: color-mix(in srgb, var(--tool-search) 12%, transparent); }
+.gridInspector__treeRow:focus-visible { outline: 2px solid var(--tool-search); outline-offset: 1px; }
+.gridInspector__treeMark { flex: none; color: var(--text-3); }
+.gridInspector__treeText { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.gridInspector__treeTitle { color: var(--text); overflow-wrap: anywhere; }
+.gridInspector__treeMeta { color: var(--text-3); font-size: 10px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.gridInspector__treeSummary { flex: 1 1 100%; color: var(--text-2); overflow-wrap: anywhere; }
+.gridInspector__treeFiles { list-style: none; flex: 1 1 100%; margin: 2px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.gridInspector__rowOpen { flex: none; min-height: 28px; display: inline-flex; align-items: center; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--text-2); text-decoration: none; font-size: 11px; }
+.gridInspector__rowOpen:hover { border-color: var(--tool-search); color: var(--text); }
+.gridInspector__execution { display: flex; flex-direction: column; gap: 2px; min-width: 0; list-style: none; }
+.gridInspector__childExecution { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; padding: 5px 7px; margin-top: 4px; border-left: 2px solid var(--tool-search); font-size: 12px; }
+
+/* The path of a file or a folder: every step is a way back up. */
+.gridInspector__crumbs { display: flex; flex-wrap: wrap; list-style: none; margin: 0; padding: 0; gap: 4px; font-size: 11px; }
+.gridInspector__crumb { display: flex; align-items: center; gap: 4px; color: var(--text-3); }
+.gridInspector__crumb + .gridInspector__crumb::before { content: "/"; opacity: .6; }
+.gridInspector__crumbButton { padding: 2px 1px; border: 0; background: none; color: var(--text-2); font: inherit; cursor: pointer; }
+.gridInspector__crumbButton:hover { color: var(--text); }
+.gridInspector__crumbCurrent { color: var(--text); }
+
+/* -- a chat's activity: six typed events at most --------------------------- */
+.gridActivity { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+.gridActivity__item { position: relative; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding-left: 18px; font-size: 12px; line-height: 1.4; }
+.gridActivity__kind { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+.gridActivity__mark { position: absolute; left: 0; top: 0; color: var(--text-3); }
+.gridActivity__title { flex: 1 1 100%; color: var(--text); overflow-wrap: anywhere; }
+.gridActivity__summary { flex: 1 1 100%; color: var(--text-2); overflow-wrap: anywhere; }
+.gridActivity__meta { font-size: 10px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.gridActivity__item[data-kind=reasoning] .gridActivity__mark { color: var(--text-2); }
+.gridActivity__item[data-kind=tool] .gridActivity__mark { color: var(--tool-search); }
+.gridActivity__item[data-kind=error] .gridActivity__mark,
+.gridActivity__item[data-status=error] .gridActivity__mark { color: var(--danger); }
+.gridActivity__item[data-status=running] .gridActivity__mark { color: var(--tool-search); }
+.gridActivity__files { list-style: none; flex: 1 1 100%; margin: 2px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.gridFileRef {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-height: 28px; padding: 2px 9px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--bg-inset); color: var(--text-2);
+  font-size: 11px; line-height: 1.3; cursor: pointer; overflow-wrap: anywhere;
+}
+.gridFileRef:hover { border-color: var(--tool-search); color: var(--text); }
+.gridFileRef__mark { flex: none; color: var(--text-3); }
+
+/* -- the real agent/context tree ------------------------------------------ */
+.gridContexts { display: grid; gap: 12px; margin-block: 10px; }
+.gridContext { min-width: 0; }
+.gridContext__head { min-width: 0; padding: 2px 6px; border-radius: 7px; }
+.gridContext[data-selected=true] > .gridContext__head { background: color-mix(in srgb, var(--tool-search) 16%, transparent); outline: 1px solid color-mix(in srgb, var(--tool-search) 46%, transparent); }
+.gridContext__toggle:focus-visible { outline: 2px solid var(--tool-search); outline-offset: 2px; border-radius: 5px; }
+.gridContext__body { min-width: 0; }
+.gridContext__children { display: grid; gap: 7px; margin-top: 7px; }
+
+/* -- a folder's entries, and the first lines of a file --------------------- */
+.gridInspector__entries { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.gridInspector__entryButton {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 36px; padding: 2px 4px;
+  border: 0; border-radius: 6px; background: none; color: var(--text); font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+}
+.gridInspector__entryButton:hover { background: var(--bg-2); color: var(--tool-search); }
+.gridInspector__entryMark { flex: none; color: var(--text-3); }
+.gridInspector__entryName { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.gridInspector__entryMeta { flex: none; font-size: 10px; color: var(--text-3); }
+.gridInspector__entry[data-selected=true] .gridInspector__entryButton { color: var(--tool-search); }
+.gridInspector__preview { display: flex; flex-direction: column; gap: 6px; }
+.gridPreview {
+  list-style: none; margin: 0; padding: 8px 0; overflow-x: auto;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg-inset);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.55;
+}
+.gridPreview__line { display: flex; gap: 10px; padding: 0 10px; white-space: pre; }
+.gridPreview__number { flex: none; width: 3ch; text-align: right; color: var(--text-3); }
+.gridPreview__text { color: var(--text-2); }
+
+/* A mode the page cannot offer here: it says so rather than pretending. */
+.gridActions [aria-disabled=true] { opacity: .55; cursor: default; }
+
 /* -- narrower screens ------------------------------------------------------- */
 @media (max-width: 1060px) {
   .gridBody { grid-template-columns: minmax(0, 1fr); }
@@ -225,3 +481,73 @@
 @media (prefers-reduced-motion: reduce) {
   .gridNode, .gridOverview__link { transition: none; }
 }
+
+/* -- a phone reads a document, not a plane --------------------------------- */
+@media (max-width: 720px) {
+  .gridActions { flex-wrap: wrap; }
+  .gridNode { min-height: 70px; }
+  /* Space still works when it is explicitly chosen, but it is not the default. */
+  .gridSpace__viewport { height: 62vh; min-height: 380px; border-radius: 12px; }
+  .gridProjection__viewport { border-radius: 12px; }
+  .gridProjection { padding: 12px; gap: 12px; }
+  .gridProjection__tab, .gridProjection__action, .gridProjection__open, .gridProjection__chip { min-height: 44px; }
+  .gridProjection__tab { font-size: 13px; }
+  .gridProjection__title { font-size: 14px; }
+  .gridProjection__meta, .gridProjection__note, .gridProjection__count { font-size: 12px; }
+  .gridProjection__rowMain { flex-wrap: wrap; }
+  .gridProjection__open { margin-left: auto; }
+  /* Touch: every control the panel offers is a real target. */
+  .gridInspector__close { width: 44px; height: 44px; min-height: 44px; font-size: 18px; }
+  .gridInspector__entryButton { min-height: 44px; font-size: 14px; }
+  .gridInspector__entryMeta { font-size: 12px; }
+  .gridFileRef { min-height: 36px; font-size: 13px; }
+  .gridInspector__name { font-size: 16px; }
+  .gridInspector__note, .gridInspector__value, .gridActivity__item { font-size: 14px; }
+  .gridActivity__title { font-size: 14px; }
+  .gridActivity__summary { font-size: 14px; }
+  .gridActivity__meta, .gridActivity__kind { font-size: 12px; }
+  .gridInspector__term, .gridInspector__crumbs { font-size: 12px; }
+  .gridInspector__crumbButton { min-height: 32px; font-size: 12px; }
+  .gridInspector__treeToggle, .gridInspector__rowOpen { min-height: 44px; }
+  .gridInspector__treeRow { min-height: 44px; font-size: 14px; }
+  .gridInspector__treeTitle { font-size: 14px; }
+  .gridInspector__treeMeta, .gridInspector__treeLabel, .gridInspector__treeCount { font-size: 12px; }
+  .gridPreview { font-size: 12px; }
+  .gridActivity__mark { position: static; }
+  .gridActivity__item { padding-left: 0; }
+}
+
+/* A device that asks for reduced motion gets no transition at all. */
+@media (prefers-reduced-motion: reduce) {
+  .gridNode, .gridOverview__link, .gridFileRef, .gridInspector__close,
+  .gridInspector__entryButton, .gridInspector__crumbButton { transition: none; }
+}
+
+/* -- Office: a cutaway room, bounded labels and a keyboard directory -------- */
+.gridOffice__viewport { min-width: 0; max-width: 100%; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: rgb(9 12 16); }
+.grid-office-root { min-width: 0; }
+.grid-office-stage { position: relative; height: clamp(600px, 72vh, 900px); min-height: 600px; overflow: hidden; }
+.grid-office-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+.grid-office-canvas:focus-visible { outline: 2px solid var(--tool-search); outline-offset: -3px; }
+.grid-office-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.grid-office-label { position: absolute; left: 0; top: 0; max-width: 300px; padding: 4px 7px; border: 1px solid rgb(126 158 179 / 24%); border-radius: 5px; background: rgb(7 12 17 / 88%); color: #d7e3eb; font: 10px/1.35 system-ui, sans-serif; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.grid-office-label[data-zone=true] { color: #a6c2d2; font-size: 11px; letter-spacing: .08em; border-color: rgb(126 158 179 / 40%); }
+.grid-office-label[data-selected=true] { color: #f1fcff; border-color: #66d8eb; background: rgb(13 31 39 / 95%); }
+.grid-office-toolbar { position: absolute; top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+.grid-office-action { min-height: 44px; padding: 0 12px; border: 1px solid #506471; border-radius: 8px; color: #eef7fb; background: rgb(11 18 25 / 96%); font: inherit; font-size: 12px; cursor: pointer; }
+.grid-office-action:disabled { opacity: .45; cursor: default; }
+.grid-office-action:hover:not(:disabled) { border-color: #66d8eb; background: rgb(18 34 43 / 98%); }
+.grid-office-action:focus-visible, .grid-office-object:focus-visible, .grid-office-directorySummary:focus-visible, .grid-office-search:focus-visible, .grid-office-filter:focus-visible { outline: 2px solid var(--tool-search); outline-offset: 2px; }
+.grid-office-hint { position: absolute; bottom: 12px; left: 12px; right: 12px; margin: 0; padding: 9px 12px; border: 1px solid rgb(126 158 179 / 24%); border-radius: 8px; background: rgb(7 12 17 / 92%); color: #d1dce3; font-size: 12px; line-height: 1.5; pointer-events: none; }
+.grid-office-footer { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); }
+.grid-office-snapshot, .grid-office-legend, .grid-office-relations, .grid-office-directoryCount { margin: 0; color: var(--text-2); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.grid-office-legend, .grid-office-directoryCount { color: var(--text-3); }
+.grid-office-directorySummary { min-height: 44px; display: list-item; padding: 12px 4px 6px; cursor: pointer; color: var(--text-2); font-size: 12px; }
+.grid-office-directoryBody { min-width: 0; }
+.grid-office-directoryControls { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-bottom: 8px; }
+.grid-office-searchLabel { display: flex; flex: 1 1 220px; flex-direction: column; gap: 4px; color: var(--text-3); font-size: 11px; }
+.grid-office-search, .grid-office-filter { min-width: 0; box-sizing: border-box; min-height: 44px; padding: 8px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--bg-inset); color: var(--text); font: inherit; font-size: 12px; }
+.grid-office-directoryList { list-style: none; padding: 0; margin: 6px 0 0; max-height: 320px; overflow: auto; }
+.grid-office-object { box-sizing: border-box; display: flex; align-items: center; width: 100%; min-height: 44px; padding: 8px; border: 0; border-bottom: 1px solid var(--line); background: none; color: var(--text-2); text-align: left; text-decoration: none; font: inherit; font-size: 12px; overflow-wrap: anywhere; cursor: pointer; }
+.grid-office-object[aria-current=true] { color: var(--tool-search); background: var(--bg-2); }
+@media (max-width: 720px) { .grid-office-stage { height: 520px; min-height: 520px; } .grid-office-label { max-width: 220px; } }

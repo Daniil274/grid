@@ -48,7 +48,9 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -73,6 +75,11 @@ from web_chat.build_info import SHORT as BUILD_COMMIT_SHORT
 from web_chat.build_info import UNKNOWN, read_build_info
 from web_chat.explorer_api import list_folder
 from web_chat.plan_board import latest_plan
+from web_chat.session import (
+    ACTIVITY_SUMMARY_LIMIT,
+    ACTIVITY_TITLE_LIMIT,
+    public_activity,
+)
 from web_chat.space import SPACE_ID
 from web_chat.tasks_api import _counts, _issues, _task
 from web_chat.trace import normalize_steps
@@ -82,7 +89,7 @@ logger = logging.getLogger(__name__)
 
 #: How many tasks, chats and file entries one map shows at most.
 TASKS_LIMIT = 300
-PROCESSES_LIMIT = 50
+CHATS_LIMIT = 50
 FILES_LIMIT = 100
 
 #: What the map says of a chat's work: the latest steps of its turn, and the
@@ -90,6 +97,29 @@ FILES_LIMIT = 100
 STEPS_LIMIT = 3
 STEP_TITLE_LIMIT = 120
 TASK_LINKS_LIMIT = 50
+
+#: A chat's detail is loaded lazily, apart from the lightweight map, and each
+#: of its sections is bounded on its own: the newest messages and runs, and
+#: every operation of them up to a hard cap.
+DETAIL_MESSAGES_LIMIT = 30
+DETAIL_EXECUTIONS_LIMIT = 30
+DETAIL_OPERATIONS_LIMIT = 100
+DETAIL_PREVIEW_LIMIT = 180
+DETAIL_AGENT_LIMIT = 80
+DETAIL_TIME_LIMIT = 40
+
+#: The allowlist of a stored message: its role, its tagged kind and every id.
+#: An unknown role is named ``other`` and carries none of its content.
+_DETAIL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
+_DETAIL_ROLES = frozenset({"user", "assistant", "system"})
+_DETAIL_KINDS = {
+    "continuation": "continuation",
+    "context_compacted": "compaction",
+    "compaction": "compaction",
+    "context": "context",
+    "tool_result": "tool_result",
+    "agent_response": "agent_response",
+}
 
 #: How long bd and the folder listing may take before the map says so.
 BD_TIMEOUT_SECONDS = 20.0
@@ -1051,7 +1081,7 @@ async def _tasks(space: Any, project_id: str, trace: Optional[ReadTrace] = None)
     })
 
 
-def _processes(space: Any, project_id: str) -> dict[str, Any]:
+def _chats(space: Any, project_id: str) -> dict[str, Any]:
     """The chats of the project: which work now, which wait for the user.
 
     ``conversation_views`` gives every chat of the space (its metadata copied,
@@ -1106,7 +1136,7 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
                 running = bool(turns.is_running(chat_id))
             except Exception:  # noqa: BLE001
                 running = False
-        steps, links, links_total, link_counts = _activity(
+        _, _, links, links_total, link_counts = _activity(
             space, chat_id, project_id, running=running
         )
         items.append(
@@ -1116,7 +1146,6 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
                 "updated_at": view.get("updated_at") or metadata.get("updated_at"),
                 "active": running,
                 "awaiting_approval": bool(awaiting.get(chat_id)),
-                "steps": steps,
                 "task_links": links,
                 "task_links_total": links_total,
                 "task_link_counts": link_counts,
@@ -1130,9 +1159,9 @@ def _processes(space: Any, project_id: str) -> dict[str, Any]:
         "available": True,
         "reason": None,
         "reason_code": None,
-        "items": items[:PROCESSES_LIMIT],
+        "items": items[:CHATS_LIMIT],
         "total": len(items),
-        "truncated": len(items) > PROCESSES_LIMIT,
+        "truncated": len(items) > CHATS_LIMIT,
         "counts": {
             "active": sum(item["active"] for item in items),
             "awaiting_approval": sum(item["awaiting_approval"] for item in items),
@@ -1160,15 +1189,15 @@ def _step_titles(steps: Any) -> List[str]:
     return titles[-STEPS_LIMIT:]
 
 
-def _stored_steps(messages: List[Any]) -> List[str]:
-    """The latest steps the conversation's newest stored trace holds."""
+def _stored_trace(messages: List[Any]) -> List[Any]:
+    """The newest nonempty stored trace of the conversation, or an empty list."""
     for message in reversed(messages):
         if not isinstance(message, dict):
             continue
         metadata = message.get("metadata") or {}
         trace = metadata.get("trace") or normalize_steps(metadata.get("trace_events")) or []
         if isinstance(trace, list) and trace:
-            return _step_titles(trace)
+            return trace
     return []
 
 
@@ -1211,30 +1240,46 @@ def _task_links(
     return links[:TASK_LINKS_LIMIT], len(links), counts
 
 
+def _reported_activity(value: Any) -> dict[str, Any]:
+    """The live activity a turn reports, with every item re-normalized here.
+
+    The turn's ``recent_activity`` already projects its trace; the map checks
+    the shape again so an unknown turn can never widen the contract - its
+    contexts and each item's ``context_id`` included. The total is the turn's
+    own count before its bound, never smaller than what is shown.
+    """
+    if isinstance(value, dict):
+        return public_activity(value)
+    return public_activity(value if isinstance(value, list) else [])
+
+
 def _live_activity(
     turn: Any, project_id: str
-) -> tuple[List[str], List[dict[str, str]], int, dict[str, int]]:
+) -> tuple[dict[str, Any], List[str], List[dict[str, str]], int, dict[str, int]]:
     """What a running turn did so far, read through its public methods only."""
+    activity = getattr(turn, "recent_activity", None)
+    shown = _reported_activity(activity() if callable(activity) else None)
     recent = getattr(turn, "recent_steps", None)
     steps = _step_titles(recent() if callable(recent) else [])
     snapshot = getattr(turn, "plan_snapshot", None)
     links, total, counts = _task_links(snapshot() if callable(snapshot) else None, project_id)
-    return steps, links, total, counts
+    return shown, steps, links, total, counts
 
 
 def _stored_activity(
     manager: Any, chat_id: str, project_id: str
-) -> tuple[List[str], List[dict[str, str]], int, dict[str, int]]:
+) -> tuple[dict[str, Any], List[str], List[dict[str, str]], int, dict[str, int]]:
     """What an idle chat's newest stored turn and plan hold, from one read."""
     snapshot = manager.get_context_messages(chat_id, limit=40)
     messages = list((snapshot or {}).get("messages") or [])
+    trace = _stored_trace(messages)
     links, total, counts = _task_links(latest_plan(messages), project_id)
-    return _stored_steps(messages), links, total, counts
+    return public_activity(trace), _step_titles(trace), links, total, counts
 
 
 def _activity(
     space: Any, chat_id: str, project_id: str, *, running: bool
-) -> tuple[List[str], List[dict[str, str]], int, dict[str, int]]:
+) -> tuple[dict[str, Any], List[str], List[dict[str, str]], int, dict[str, int]]:
     """A chat's latest steps and task links; none of them worth a failed map.
 
     A running chat is read from its live turn (``recent_steps`` and the live
@@ -1255,7 +1300,7 @@ def _activity(
             return _stored_activity(manager(), chat_id, project_id)
     except Exception:  # noqa: BLE001 - activity is a convenience, never a failure
         logger.debug("map: no activity for a chat of %s", project_id, exc_info=True)
-    return [], [], 0, _no_link_counts()
+    return public_activity([]), [], [], 0, _no_link_counts()
 
 
 def _modified(mtime: Any) -> Optional[str]:
@@ -1346,6 +1391,277 @@ def _files_url(space: Any, project_id: str, chats: List[str]) -> Optional[str]:
     return f"/files?context={quote(chats[0], safe='')}&path=project"
 
 
+def _detail_text(value: Any, limit: int) -> str:
+    """*value* as one bounded line, or "" when it is not text."""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:limit]
+
+
+def _detail_id(value: Any) -> Optional[str]:
+    """*value* as a safe id, or None: the allowlist every id of a detail meets."""
+    text = value.strip() if isinstance(value, str) else ""
+    return text if _DETAIL_ID.fullmatch(text) else None
+
+
+def _detail_number(value: Any) -> Optional[float]:
+    """A finite nonnegative number (never a bool), or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _detail_kind(metadata: dict[str, Any]) -> Optional[str]:
+    """The public kind a stored message is tagged with, or None."""
+    for candidate in (metadata.get("kind"), metadata.get("type")):
+        if isinstance(candidate, str) and candidate in _DETAIL_KINDS:
+            return _DETAIL_KINDS[candidate]
+    return None
+
+
+def _detail_message(entry: Any, position: int) -> Optional[dict[str, Any]]:
+    """One stored message as the detail may show it, or None.
+
+    Only the role, the moment, the tagged kind, the already-sanitized preview
+    and whether an image is attached are read; the message's own metadata - a
+    raw trace, an agent input - never leaves here as such.
+    """
+    if not isinstance(entry, dict):
+        return None
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    role = entry.get("role")
+    known_role = role if role in _DETAIL_ROLES else None
+    item: dict[str, Any] = {
+        "id": _detail_id(metadata.get("message_id")) or f"message:{position}",
+        "role": known_role or "other",
+        "time": _detail_text(entry.get("timestamp"), DETAIL_TIME_LIMIT) or None,
+        "kind": None,
+        "preview": "",
+        "has_image": False,
+    }
+    if known_role is None:  # a message this contract does not know: no content
+        return item
+    item["kind"] = _detail_kind(metadata)
+    item["preview"] = _detail_text(entry.get("preview"), DETAIL_PREVIEW_LIMIT)
+    item["has_image"] = bool(entry.get("has_image"))
+    turn_id = _detail_id(metadata.get("turn_id"))
+    if turn_id is not None:
+        item["turn_id"] = turn_id
+    return item
+
+
+def _detail_section(items: List[dict[str, Any]], total: int, cap: int) -> dict[str, Any]:
+    """The newest *cap* items of a section, with its honest total."""
+    total = max(total, len(items))
+    shown = items[-cap:] if cap >= 0 else list(items)
+    return {"items": shown, "total": total, "truncated": total > len(shown)}
+
+
+def _run_item(entry: dict[str, Any], context_id: str, ordinal: int) -> dict[str, Any]:
+    """One stored run as the detail may show it.
+
+    An explicit ``turn_id`` names the run stably; a record stored before turn
+    ids existed falls back to its conversation, its ordinal and its start.
+    Only a boolean says whether the run failed - never the error's text.
+    """
+    turn_id = _detail_id(entry.get("turn_id"))
+    start = _detail_number(entry.get("start_time"))
+    if turn_id is not None:
+        run_id = f"turn:{turn_id}"
+    else:
+        stamp = "%g" % start if start is not None else "na"
+        run_id = f"legacy:{context_id}:{ordinal}:{stamp}"
+    end = _detail_number(entry.get("end_time"))
+    duration = (
+        int(round((end - start) * 1000))
+        if start is not None and end is not None and end >= start
+        else None
+    )
+    failed = bool(entry.get("has_error"))
+    return {
+        "id": run_id,
+        "turn_id": turn_id,
+        "agent": _detail_text(entry.get("agent_name"), DETAIL_AGENT_LIMIT) or "unknown",
+        "status": "failed" if failed else ("done" if end is not None else "running"),
+        "start_time": start,
+        "end_time": end,
+        "duration_ms": duration,
+        "error": failed,
+    }
+
+
+def _detail_runs(snapshot: dict[str, Any], context_id: str) -> tuple[List[dict[str, Any]], int]:
+    """Every stored run of a chat, chronological, and how many the chat holds."""
+    entries = snapshot.get("executions") if isinstance(snapshot.get("executions"), list) else []
+    total = snapshot.get("count")
+    if isinstance(total, bool) or not isinstance(total, int) or total < len(entries):
+        total = len(entries)
+    offset = total - len(entries)
+    runs: List[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        run = _run_item(entry, context_id, offset + index)
+        if run["id"] in seen:  # a repeated turn id names one run only once
+            continue
+        seen.add(run["id"])
+        runs.append(run)
+    runs.sort(key=lambda run: (run["start_time"] is None, run["start_time"] or 0.0))
+    return runs, total
+
+
+def _trace_steps(metadata: dict[str, Any]) -> List[Any]:
+    """The stored trace of a message, in its current or its pre-``Step`` form."""
+    trace = metadata.get("trace")
+    if isinstance(trace, list):
+        return trace
+    events = metadata.get("trace_events")
+    return normalize_steps(events) if isinstance(events, list) else []
+
+
+def _public_steps(trace: List[Any]) -> List[tuple[dict[str, Any], Any]]:
+    """Each real step of *trace* as its public item and its raw parent id.
+
+    Every step passes through :func:`public_activity` - the same strict
+    projector the map's activity uses - so a title, a summary, a file ref or a
+    timing here is exactly as bounded and as payload-free as there.
+    """
+    steps: List[tuple[dict[str, Any], Any]] = []
+    for step in trace:
+        if not isinstance(step, dict):
+            continue
+        public = public_activity([step])
+        items = public.get("items") or []
+        if not items:
+            continue
+        steps.append((items[-1], step.get("parent_id")))
+    return steps
+
+
+def _message_operations(metadata: dict[str, Any], execution_id: str) -> List[dict[str, Any]]:
+    """The operations one assistant message's own trace records."""
+    steps = _public_steps(_trace_steps(metadata))
+    included = {item["id"] for item, _ in steps}
+    operations: List[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item, raw_parent in steps:
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        parent_id = _detail_id(raw_parent)
+        operations.append({
+            "id": item["id"],
+            "execution_id": execution_id,
+            # A parent is named only when it is one of the steps shown here.
+            "parent_id": parent_id if parent_id in included and parent_id != item["id"] else None,
+            "kind": item["kind"],
+            "title": item["title"],
+            "status": item["status"],
+            "at_ms": item["at_ms"],
+            "duration_ms": item["duration_ms"],
+            "files": item["files"],
+            "summary": item["summary"],
+        })
+    return operations
+
+
+def _message_run(execution_id: str, turn_id: Optional[str], metadata: dict[str, Any]) -> dict[str, Any]:
+    """A run record for an assistant message whose own run is not in the window.
+
+    A legacy trace names no turn; its message is the only honest owner of its
+    operations, so the message itself becomes the run (``message:<id>``).
+    """
+    return {
+        "id": execution_id,
+        "turn_id": turn_id,
+        "agent": _detail_text(metadata.get("agent"), DETAIL_AGENT_LIMIT) or "unknown",
+        "status": "done",
+        "start_time": None,
+        "end_time": None,
+        "duration_ms": None,
+        "error": False,
+    }
+
+
+def _chat_detail(messages_snapshot: dict[str, Any], executions_snapshot: dict[str, Any],
+                 context_id: str) -> dict[str, Any]:
+    """The safe messages, runs and operations of one chat, each bounded.
+
+    Operations are read from an assistant message's stored trace only, and are
+    tied to a run by that message's own explicit ``turn_id`` - or, when it has
+    none, by the message's own fallback run. A run is never guessed from a
+    timing or a neighbour.
+    """
+    runs, runs_total = _detail_runs(executions_snapshot, context_id)
+    runs_by_id = {run["id"]: run for run in runs}
+    entries = messages_snapshot.get("messages") if isinstance(messages_snapshot.get("messages"), list) else []
+    total = messages_snapshot.get("count")
+    if isinstance(total, bool) or not isinstance(total, int) or total < len(entries):
+        total = len(entries)
+    offset = total - len(entries)
+
+    messages: List[dict[str, Any]] = []
+    operations: List[dict[str, Any]] = []
+    seen_operations: set[str] = set()
+    for index, entry in enumerate(entries):
+        item = _detail_message(entry, offset + index)
+        if item is None:
+            continue
+        messages.append(item)
+        if item["role"] != "assistant" or not isinstance(entry, dict):
+            continue
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        if not _trace_steps(metadata):
+            continue
+        turn_id = _detail_id(metadata.get("turn_id"))
+        # Only an explicit turn id joins a message to a run; a legacy message
+        # owns its trace through a run of its own, never through a guessed one.
+        execution_id = f"turn:{turn_id}" if turn_id is not None else f"message:{item['id']}"
+        if execution_id not in runs_by_id:
+            runs_by_id[execution_id] = _message_run(execution_id, turn_id, metadata)
+            runs.append(runs_by_id[execution_id])
+        for operation in _message_operations(metadata, execution_id):
+            if operation["id"] in seen_operations:  # one operation id, one row
+                continue
+            seen_operations.add(operation["id"])
+            operations.append(operation)
+
+    operations_total = len(operations)
+    shown_operations = operations[-DETAIL_OPERATIONS_LIMIT:]
+    kept_operations = {operation["id"] for operation in shown_operations}
+    for operation in shown_operations:
+        if operation["parent_id"] is not None and operation["parent_id"] not in kept_operations:
+            operation["parent_id"] = None
+
+    runs.sort(key=lambda run: (run["start_time"] is None, run["start_time"] or 0.0))
+    shown_runs = runs[-DETAIL_EXECUTIONS_LIMIT:]
+    shown_run_ids = {run["id"] for run in shown_runs}
+    # Every operation names a run the answer holds, even one older than the window.
+    for operation in shown_operations:
+        run = runs_by_id.get(operation["execution_id"])
+        if run is not None and run["id"] not in shown_run_ids:
+            shown_runs.append(run)
+            shown_run_ids.add(run["id"])
+    shown_runs.sort(key=lambda run: (run["start_time"] is None, run["start_time"] or 0.0))
+    runs_total = max(runs_total, len(runs))
+
+    return {
+        "messages": _detail_section(messages, total, DETAIL_MESSAGES_LIMIT),
+        "executions": {
+            "items": shown_runs,
+            "total": runs_total,
+            "truncated": runs_total > len(shown_runs),
+        },
+        "operations": {
+            "items": shown_operations,
+            "total": operations_total,
+            "truncated": operations_total > len(shown_operations),
+        },
+    }
+
+
 def register_map_routes(api: APIRouter, current_space: Any,
                         build: Optional[Callable[[], dict[str, Any]]] = None) -> None:
     """Mount the map route on *api*; it resolves the space itself.
@@ -1370,20 +1686,90 @@ def register_map_routes(api: APIRouter, current_space: Any,
         if project is None:  # deleted between the two reads
             raise HTTPException(status_code=404, detail="Project not found")
         tasks, files = await asyncio.gather(_tasks(space, project_id), _files(space, project_id))
-        processes = _processes(space, project_id)
+        chats = _chats(space, project_id)
         payload = {
             "project": _project_payload(project),
             "path": _ancestors(store, project),
             "children": _children(store, project_id),
             "server": _public_build(read_build()),
             "tasks": tasks.payload,
-            "processes": processes,
+            "chats": chats,
             "files": files,
-            "files_url": _files_url(space, project_id, [item["chat_id"] for item in processes["items"]]),
+            "files_url": _files_url(space, project_id, [item["chat_id"] for item in chats["items"]]),
         }
         body = _canonical(payload)
         etag = _etag_of(body)
         # One user's map: no shared cache keeps it, and every use revalidates.
+        headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+        if _matches(if_none_match, etag):
+            return Response(status_code=304, headers=headers)
+        return Response(content=body, media_type="application/json", headers=headers)
+
+    @api.get("/api/projects/{project_id}/map/chats/{chat_id}")
+    async def project_chat_detail(
+        project_id: str,
+        chat_id: str,
+        space: Any = Depends(current_space),
+        if_none_match: Optional[str] = Header(default=None, alias="If-None-Match"),
+    ) -> Response:
+        """One chat of a project: its messages, its runs and their operations.
+
+        The map stays one lightweight read; this detail is asked for only when
+        a chat is selected. A chat of another project - or of the user's other
+        space - is not found at all. Nothing raw is answered: a message is a
+        role, a moment, a tagged kind and a sanitized preview, a run carries no
+        error text, and an operation is a bounded, payload-free trace step.
+        """
+        if not SPACE_ID.fullmatch(project_id) or not space.project_exists(project_id):
+            raise HTTPException(status_code=404, detail="Project not found")
+        manager = getattr(space, "context_manager", None)
+        if manager is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        manager = manager()
+        try:
+            views = manager.conversation_views()
+        except Exception:  # noqa: BLE001 - an unreadable chat is not shown
+            logger.warning("map: the chats of %s could not be listed", project_id)
+            raise HTTPException(status_code=404, detail="Chat not found")
+        view = next(
+            (
+                candidate for candidate in views or []
+                if isinstance(candidate, dict)
+                and candidate.get("id") == chat_id
+                and (candidate.get("metadata") or {}).get("project_id") == project_id
+            ),
+            None,
+        )
+        if view is None:  # a foreign, deleted or misnamed chat is never read
+            raise HTTPException(status_code=404, detail="Chat not found")
+        messages = manager.get_context_messages(
+            chat_id,
+            limit=DETAIL_MESSAGES_LIMIT,
+            preview_limit=DETAIL_PREVIEW_LIMIT,
+            include_full=False,
+        )
+        executions = manager.get_context_executions(
+            chat_id,
+            limit=DETAIL_EXECUTIONS_LIMIT,
+            preview_limit=0,
+            include_full=False,
+        )
+        if not isinstance(messages, dict) or not isinstance(executions, dict):
+            raise HTTPException(status_code=404, detail="Chat not found")
+        try:
+            title = conversation_title(view)
+        except Exception:  # noqa: BLE001 - the title is never worth a failed detail
+            title = (view.get("metadata") or {}).get("title") or chat_id
+        payload = {
+            "chat": {
+                "id": chat_id,
+                "title": title,
+                "href": f"/?conversation={quote(str(chat_id), safe='')}",
+            },
+            **_chat_detail(messages, executions, chat_id),
+        }
+        body = _canonical(payload)
+        etag = _etag_of(body)
         headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
         if _matches(if_none_match, etag):
             return Response(status_code=304, headers=headers)

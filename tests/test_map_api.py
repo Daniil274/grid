@@ -36,18 +36,31 @@ from web_chat.turns import TurnBoard
 
 
 class FakeManager:
-    """What the map asks of a context manager: the chats, and one chat's messages."""
+    """What the map asks of a context manager: the chats, a chat's messages and runs."""
 
-    def __init__(self, views, messages=None):
+    def __init__(self, views, messages=None, executions=None):
         self._views = views
         self._messages = messages if messages is not None else {}
+        self._executions = executions if executions is not None else {}
 
     def conversation_views(self):
         return list(self._views)
 
-    def get_context_messages(self, context_id, *, limit=None):
+    def get_context_messages(self, context_id, *, limit=None, preview_limit=500, include_full=False):
         messages = list(self._messages.get(context_id, []))
-        return {"messages": messages[-limit:] if limit else messages}
+        return {
+            "context_id": context_id,
+            "count": len(messages),
+            "messages": messages[-limit:] if limit else messages,
+        }
+
+    def get_context_executions(self, context_id, *, limit=None, preview_limit=500, include_full=False):
+        executions = list(self._executions.get(context_id, []))
+        return {
+            "context_id": context_id,
+            "count": len(executions),
+            "executions": executions[-limit:] if limit else executions,
+        }
 
 
 class FakeSpace:
@@ -64,10 +77,12 @@ class FakeSpace:
         self._views = []
         #: Stored messages by chat id, as the context manager would answer them.
         self.messages = {}
+        #: Stored runs by chat id, as the context manager would answer them.
+        self.executions = {}
         self.waiting = {}
 
     def context_manager(self):
-        return FakeManager(self._views, self.messages)
+        return FakeManager(self._views, self.messages, self.executions)
 
     def awaiting_approval(self):
         return self.waiting
@@ -210,8 +225,14 @@ def test_the_map_has_the_page_contract(client, space, bd):
     assert tasks["counts"]["in_progress"] == 1
 
     # Newest chat first; the other project's chat never appears.
-    assert [item["chat_id"] for item in body["processes"]["items"]] == ["chat-1", "chat-2"]
-    assert body["processes"]["total"] == 2
+    assert [item["chat_id"] for item in body["chats"]["items"]] == ["chat-1", "chat-2"]
+    assert body["chats"]["total"] == 2
+    # The map is a summary: no chat's steps and no chat's activity live here.
+    assert "processes" not in body
+    assert set(body["chats"]["items"][0]) == {
+        "chat_id", "title", "updated_at", "active", "awaiting_approval",
+        "task_links", "task_links_total", "task_link_counts",
+    }
 
     files = body["files"]
     assert files["available"] is True
@@ -318,26 +339,26 @@ def test_tasks_are_bounded_and_come_oldest_first(client, space, bd):
     assert created == sorted(created)
 
 
-def test_processes_are_bounded_and_running_chats_come_first(client, space, bd):
+def test_chats_are_bounded_and_running_chats_come_first(client, space, bd):
     root = project(space)
     space._views = [
         view(f"chat-{index:02d}", root.id, updated_at=f"2026-01-{index + 1:02d}T00:00:00Z")
-        for index in range(map_api.PROCESSES_LIMIT + 3)
+        for index in range(map_api.CHATS_LIMIT + 3)
     ]
 
     body = client.get(f"/api/projects/{root.id}/map").json()
 
-    processes = body["processes"]
-    assert processes["total"] == map_api.PROCESSES_LIMIT + 3
-    assert processes["truncated"] is True
-    assert len(processes["items"]) == map_api.PROCESSES_LIMIT
+    chats = body["chats"]
+    assert chats["total"] == map_api.CHATS_LIMIT + 3
+    assert chats["truncated"] is True
+    assert len(chats["items"]) == map_api.CHATS_LIMIT
     # Without a running turn the newest chat is first.
-    assert processes["items"][0]["chat_id"] == f"chat-{map_api.PROCESSES_LIMIT + 2:02d}"
+    assert chats["items"][0]["chat_id"] == f"chat-{map_api.CHATS_LIMIT + 2:02d}"
     # A running chat, however old, comes above the idle ones.
     space.turns.register("chat-00", object(), _Running())
     body = client.get(f"/api/projects/{root.id}/map").json()
-    assert body["processes"]["items"][0]["chat_id"] == "chat-00"
-    assert body["processes"]["items"][0]["active"] is True
+    assert body["chats"]["items"][0]["chat_id"] == "chat-00"
+    assert body["chats"]["items"][0]["active"] is True
 
 
 class _Running:
@@ -350,12 +371,16 @@ class _Running:
 class _LiveTurn:
     """A running turn as the map reads it: its public steps and plan only."""
 
-    def __init__(self, steps, plan):
+    def __init__(self, steps, plan, activity=None):
         self._steps = list(steps)
         self._plan = plan
+        self._activity = activity
 
     def recent_steps(self):
         return list(self._steps)
+
+    def recent_activity(self):
+        return self._activity
 
     def plan_snapshot(self):
         return self._plan
@@ -366,11 +391,34 @@ def traced(*steps):
     return {"role": "assistant", "metadata": {"trace": list(steps)}}
 
 
-def test_an_idle_chat_shows_its_last_steps_and_its_plans_task_links(client, space, bd):
+def activity_step(step_id, kind="tool", *, title="Step", status="done", at_ms=0,
+                  duration_ms=None, subtitle="", body="", refs=(), **extra):
+    """One real trace step, with the payloads the activity projection must drop."""
+    return {
+        "id": step_id,
+        "kind": kind,
+        "title": title,
+        "status": status,
+        "at_ms": at_ms,
+        "duration_ms": duration_ms,
+        "subtitle": subtitle,
+        "body": body,
+        "refs": [dict(ref) for ref in refs],
+        **extra,
+    }
+
+
+def file_ref(detail, label=None):
+    return {"kind": "file", "label": label or detail, "detail": detail}
+
+
+def test_an_idle_chat_links_its_plans_tasks_and_keeps_its_trace_in_the_detail(
+    client, space, bd
+):
     root = project(space)
     space._views = [view("chat-1", root.id)]
-    # The plan is the newest one the conversation left; the steps are the last
-    # three of its newest stored trace, in order.
+    # The plan is the newest one the conversation left; its trace is no longer
+    # part of the lightweight map - it is read as the chat's own detail.
     space.messages["chat-1"] = [
         traced({"kind": "plan", "title": "Plan · 0/2 done", "plan": {"tasks": [
             {"id": f"{root.id}-a", "title": "SECRET task title",
@@ -380,32 +428,47 @@ def test_an_idle_chat_shows_its_last_steps_and_its_plans_task_links(client, spac
             {"id": "prj-other-1", "turn": True},
         ]}}),
         traced(
-            {"kind": "tool", "title": "Searched the web", "subtitle": "SECRET query"},
-            {"kind": "tool", "title": "  Read   the\nfile  ", "body": "SECRET body"},
-            {"kind": "tool", "title": "x" * 300},
-            {"kind": "reasoning", "title": "Thinking", "body": "SECRET thinking"},
+            {"id": "s-search", "kind": "tool", "status": "done",
+             "title": "Searched the web", "subtitle": "SECRET query"},
+            {"id": "s-read", "kind": "tool", "status": "done",
+             "title": "  Read   the\nfile  ", "body": "SECRET body"},
+            {"id": "s-long", "kind": "tool", "status": "done", "title": "x" * 300},
+            {"id": "s-think", "kind": "reasoning", "status": "done",
+             "title": "Thinking", "body": "SECRET thinking"},
         ),
     ]
 
     response = client.get(f"/api/projects/{root.id}/map")
-    item = response.json()["processes"]["items"][0]
+    item = response.json()["chats"]["items"][0]
 
-    assert item["steps"] == ["Read the file", "x" * map_api.STEP_TITLE_LIMIT, "Thinking"]
-    assert all(isinstance(step, str) for step in item["steps"])
+    # The overview keeps the typed links and none of the chat's steps.
+    assert "steps" not in item and "activity" not in item
     assert item["task_links"] == [
         {"task_id": f"{root.id}-a", "relation": map_api.PLAN_RELATION},
         {"task_id": f"{root.id}-b", "relation": map_api.TURN_RELATION},
     ]
     assert item["task_links_total"] == 2
     assert item["task_link_counts"] == {"turn": 1, "plan": 1}
-    # What a task or a step says never leaves: only titles and typed links.
+    # What a task says never leaves: only typed links.
     assert "SECRET" not in response.text
     assert "prj-other" not in response.text
 
+    # The same trace, read through the chat's own detail: one bounded title
+    # per operation, normalized and cut, and not one step's own words.
+    detail_response = detail(client, root.id)
+    operations = detail_response.json()["operations"]["items"]
+    assert [(op["id"], op["title"]) for op in operations] == [
+        ("s-search", "Searched the web"),
+        ("s-read", "Read the file"),
+        ("s-long", "x" * map_api.ACTIVITY_TITLE_LIMIT),
+        ("s-think", "Thinking"),
+    ]
+    assert all(op["summary"] == "" for op in operations)
+    assert "SECRET" not in detail_response.text
+    assert "prj-other" not in detail_response.text
 
-def test_a_running_chat_shows_its_live_turn_and_the_live_plan_replaces_the_stored(
-    client, space, bd
-):
+
+def test_a_running_chats_live_plan_replaces_the_stored_one(client, space, bd):
     root = project(space)
     space._views = [view("chat-1", root.id)]
     space.messages["chat-1"] = [traced(
@@ -424,23 +487,228 @@ def test_a_running_chat_shows_its_live_turn_and_the_live_plan_replaces_the_store
     space.turns.register("chat-1", live, _Running())
 
     response = client.get(f"/api/projects/{root.id}/map")
-    item = response.json()["processes"]["items"][0]
+    item = response.json()["chats"]["items"][0]
 
     assert item["active"] is True
-    assert item["steps"] == ["Ran the tests", "Wrote the fix", "Closed the bead"]
+    # A running turn's steps are not a summary field of the map either.
+    assert "steps" not in item and "activity" not in item
     assert item["task_links"] == [
         {"task_id": f"{root.id}-new", "relation": map_api.TURN_RELATION},
         {"task_id": f"{root.id}-kept", "relation": map_api.PLAN_RELATION},
     ]
-    # The live plan replaces the stored one: no step and no link of an older turn.
+    # The live plan replaces the stored one: no link of an older turn.
     assert item["task_links_total"] == 2
     assert item["task_link_counts"] == {"turn": 1, "plan": 1}
     assert f"{root.id}-old" not in response.text
     assert "A stored step" not in response.text
+    assert "Ran the tests" not in response.text
     assert "SECRET" not in response.text
 
 
-def test_steps_and_task_links_are_bounded_while_the_total_counts_all(client, space, bd):
+def test_the_map_carries_no_activity_of_a_stored_or_a_live_turn(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    space.messages["chat-1"] = [traced(activity_step(
+        "stored", "message", title="Stored", subtitle="SECRET stored narration",
+    ))]
+    live_steps = [
+        activity_step(f"live{index}", "tool", title=f"Live {index}") for index in range(7)
+    ]
+    live_steps.append(activity_step(
+        "live-message", "message", title="Live narration", subtitle="Reading the file",
+    ))
+    live = _LiveTurn(
+        ["Live step"],
+        {"tasks": [], "counts": {}, "total": 0},
+        activity=map_api.public_activity(live_steps),
+    )
+    space.turns.register("chat-1", live, _Running())
+
+    response = client.get(f"/api/projects/{root.id}/map")
+    item = response.json()["chats"]["items"][0]
+
+    # The map is a summary: neither the stored trace nor the live turn's own
+    # report is drawn into it; the detail is the one place activity is read.
+    assert set(item) == {
+        "chat_id", "title", "updated_at", "active", "awaiting_approval",
+        "task_links", "task_links_total", "task_link_counts",
+    }
+    assert "SECRET stored narration" not in response.text
+    assert "Stored" not in response.text
+    assert "Live step" not in response.text
+    assert "live-message" not in response.text
+    assert "Live narration" not in response.text
+
+
+def test_the_chat_detail_keeps_the_hierarchy_and_the_map_has_no_activity(
+    client, space, bd
+):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    steps = [
+        activity_step("s1", "tool", title="Root action"),
+        activity_step(
+            "s2", "agent", title="Agent A",
+            subtitle="SECRET A prompt", body="SECRET A reasoning",
+            input_payload={"prompt": "SECRET A input"},
+            result_payload={"report": "SECRET A report"},
+        ),
+        activity_step("s3", "tool", title="A work", parent_id="s2"),
+        activity_step(
+            "s4", "message", title="A says", parent_id="s2",
+            subtitle="A public line", body="SECRET A message",
+        ),
+        activity_step(
+            "s5", "agent", title="Agent B", status="running", parent_id="s2",
+            subtitle="SECRET B prompt", body="SECRET B reasoning",
+        ),
+        activity_step("s6", "tool", title="B work", status="running", parent_id="s5"),
+    ]
+    space.messages["chat-1"] = [traced(*steps)]
+
+    # The lightweight map is a summary for both a stored and a running turn.
+    stored_item = client.get(f"/api/projects/{root.id}/map").json()["chats"]["items"][0]
+    assert "activity" not in stored_item and "steps" not in stored_item
+    assert "SECRET" not in json.dumps(stored_item)
+
+    live = _LiveTurn(
+        ["Live step"], {"tasks": [], "counts": {}, "total": 0},
+        activity=map_api.public_activity(steps),
+    )
+    space.turns.register("chat-1", live, _Running())
+    live_item = client.get(f"/api/projects/{root.id}/map").json()["chats"]["items"][0]
+    assert live_item["active"] is True
+    assert "activity" not in live_item and "steps" not in live_item
+
+    # The chat's own detail keeps the hierarchy as parent links - and nothing raw.
+    response = detail(client, root.id)
+    operations = response.json()["operations"]["items"]
+    assert [(op["id"], op["parent_id"]) for op in operations] == [
+        ("s1", None), ("s2", None), ("s3", "s2"),
+        ("s4", "s2"), ("s5", "s2"), ("s6", "s5"),
+    ]
+    # The message names no id of its own, so its position names it - and that
+    # is the run its six operations are tied to.
+    assert [op["execution_id"] for op in operations] == ["message:message:0"] * 6
+    assert operations[3]["summary"] == "A public line"
+    assert operations[4]["status"] == "running"
+    assert operations[5]["status"] == "running"
+    assert "SECRET" not in response.text
+
+
+def test_the_detail_hides_reasoning_payloads_and_unsafe_file_refs(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    space.messages["chat-1"] = [traced(
+        # Not a step the detail knows: its kind, status and id are allowlisted.
+        activity_step("s4", "SECRET-kind", title="Unknown"),
+        activity_step("s5", "tool", title="Unknown status", status="victory"),
+        activity_step("/absolute/id", "tool", title="Unknown id"),
+        activity_step(
+            "s1", "reasoning", title="Thinking",
+            subtitle="SECRET reasoning subtitle", body="SECRET reasoning body",
+            at_ms=10, duration_ms=5,
+        ),
+        activity_step(
+            "s2", "tool", title="Read file", detail="SECRET detail",
+            input_payload={"path": "SECRET input"},
+            result_payload={"raw_text": "SECRET result"},
+            refs=[
+                file_ref("project/src/a.py"),
+                # The same file named plainly: one chip, not two.
+                file_ref("src/a.py"),
+                file_ref("/etc/passwd"),
+                file_ref("..\\secret.py"),
+                file_ref("../outside.py"),
+                file_ref("project/.beads/beads.db"),
+                file_ref(".git/config"),
+                file_ref("user/notes.md"),
+                file_ref("C:\\windows\\a.py"),
+                file_ref("file:///etc/passwd"),
+                {"kind": "url", "label": "example.com", "detail": "https://example.com/SECRET"},
+            ],
+        ),
+        activity_step(
+            "s3", "message", title="Narrating",
+            subtitle="  I will   read project/src/a.py ",
+            body="SECRET message body",
+        ),
+    )]
+
+    map_response = client.get(f"/api/projects/{root.id}/map")
+    assert "activity" not in map_response.json()["chats"]["items"][0]
+
+    response = detail(client, root.id)
+    operations = response.json()["operations"]["items"]
+    assert [operation["id"] for operation in operations] == ["s1", "s2", "s3"]
+    for operation in operations:
+        assert set(operation) == {
+            "id", "execution_id", "parent_id", "kind", "title", "status",
+            "at_ms", "duration_ms", "files", "summary",
+        }
+        assert operation["execution_id"] == "message:message:0"
+        assert operation["parent_id"] is None
+    reasoning, tool, message = operations
+    # A reasoning subtitle is its own thinking; not even the summary carries it.
+    assert (reasoning["kind"], reasoning["summary"]) == ("reasoning", "")
+    assert (reasoning["at_ms"], reasoning["duration_ms"]) == (10, 5)
+    assert tool["summary"] == ""
+    # Only safe project-relative paths survive, normalized and deduplicated.
+    assert tool["files"] == ["src/a.py"]
+    assert message["summary"] == "I will read project/src/a.py"
+    assert "SECRET" not in response.text
+    assert "/etc/passwd" not in response.text
+    assert "beads.db" not in response.text
+    assert "user/notes.md" not in response.text
+    assert "outside.py" not in response.text
+
+
+def test_the_detail_keeps_a_traces_order_four_files_and_one_title(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    steps = [
+        activity_step(f"s{index}", title=f"Step {index}", at_ms=index, duration_ms=1)
+        for index in range(8)
+    ]
+    steps[-1]["refs"] = [file_ref(f"project/src/f{index}.py") for index in range(6)]
+    steps[-1]["title"] = "x" * 300
+    steps[0]["status"] = "running"
+    space.messages["chat-1"] = [traced(*steps)]
+
+    # The map reports the chat and none of its eight steps.
+    item = client.get(f"/api/projects/{root.id}/map").json()["chats"]["items"][0]
+    assert "activity" not in item and "steps" not in item
+
+    operations = detail(client, root.id).json()["operations"]["items"]
+    assert [operation["id"] for operation in operations] == [
+        f"s{index}" for index in range(8)
+    ]
+    assert operations[-1]["title"] == "x" * map_api.ACTIVITY_TITLE_LIMIT
+    assert operations[-1]["files"] == [f"src/f{index}.py" for index in range(4)]
+    assert operations[-1]["at_ms"] == 7 and operations[-1]["duration_ms"] == 1
+    # A trace step stays a step: nothing of its 300-character title leaks whole.
+    assert "x" * (map_api.ACTIVITY_TITLE_LIMIT + 1) not in json.dumps(operations)
+
+
+def test_a_messages_summary_is_the_only_public_narration(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    space.messages["chat-1"] = [traced(activity_step(
+        "m1", "message", title="Narration", subtitle="word " * 100,
+    ))]
+
+    # The map carries no narration at all; the detail carries the one public kind.
+    assert "activity" not in client.get(
+        f"/api/projects/{root.id}/map"
+    ).json()["chats"]["items"][0]
+    entry = detail(client, root.id).json()["operations"]["items"][0]
+
+    expected = (" ".join(["word"] * 100))[:map_api.ACTIVITY_SUMMARY_LIMIT]
+    assert entry["summary"] == expected
+    assert len(entry["summary"]) == map_api.ACTIVITY_SUMMARY_LIMIT
+
+
+def test_task_links_are_bounded_while_the_total_counts_all(client, space, bd):
     root = project(space)
     space._views = [view("chat-1", root.id)]
     plan = {"tasks": [
@@ -452,10 +720,10 @@ def test_steps_and_task_links_are_bounded_while_the_total_counts_all(client, spa
         *[{"kind": "tool", "title": f"Step {index}"} for index in range(6)],
     )]
 
-    item = client.get(f"/api/projects/{root.id}/map").json()["processes"]["items"][0]
+    item = client.get(f"/api/projects/{root.id}/map").json()["chats"]["items"][0]
 
-    assert len(item["steps"]) == map_api.STEPS_LIMIT
-    assert item["steps"] == ["Step 3", "Step 4", "Step 5"]
+    # The links are bounded; the chat's own steps are not a map field any more.
+    assert "steps" not in item and "activity" not in item
     assert len(item["task_links"]) == map_api.TASK_LINKS_LIMIT
     assert item["task_links_total"] == map_api.TASK_LINKS_LIMIT + 10
     # The counts of both relations are exact over the whole plan, not over the
@@ -480,7 +748,7 @@ def test_duplicate_plan_links_count_once_and_keep_the_stronger_relation(client, 
         ]}},
     )]
 
-    item = client.get(f"/api/projects/{root.id}/map").json()["processes"]["items"][0]
+    item = client.get(f"/api/projects/{root.id}/map").json()["chats"]["items"][0]
 
     assert item["task_links"] == [{"task_id": repeated, "relation": map_api.TURN_RELATION}]
     assert item["task_links_total"] == 1
@@ -500,7 +768,7 @@ def test_an_empty_or_a_foreign_plan_is_counted_as_no_link(client, space, bd):
         {"turn": True},
     ]}})]
 
-    items = client.get(f"/api/projects/{root.id}/map").json()["processes"]["items"]
+    items = client.get(f"/api/projects/{root.id}/map").json()["chats"]["items"]
 
     assert [item["task_link_counts"] for item in items] == [
         {"turn": 0, "plan": 0},
@@ -525,9 +793,13 @@ def test_a_chat_whose_history_cannot_be_read_still_has_a_map(tmp_path, bd):
     response = TestClient(make_app({"u1": space})).get(f"/api/projects/{root.id}/map")
 
     assert response.status_code == 200
-    item = response.json()["processes"]["items"][0]
-    assert (item["steps"], item["task_links"], item["task_links_total"]) == ([], [], 0)
+    item = response.json()["chats"]["items"][0]
+    # An unreadable history leaves the chat in the map, with no links and
+    # without inventing the steps or the activity the old contract showed.
+    assert (item["task_links"], item["task_links_total"]) == ([], 0)
     assert item["task_link_counts"] == {"turn": 0, "plan": 0}
+    assert "steps" not in item and "activity" not in item
+    assert item["chat_id"] == "chat-1"
 
 
 def test_files_are_bounded_hidden_entries_excluded(client, space, bd):
@@ -1186,21 +1458,24 @@ def test_each_unavailable_section_carries_the_code_of_its_sentence(tmp_path, bd)
         assert body[section]["reason_code"] == map_api.ReasonCode.NO_SPACE.value
         assert body[section]["reason"] == map_api.REASON_TEXT[map_api.ReasonCode.NO_SPACE]
     # An available section says so with a null code, never with an absent key.
-    assert body["processes"]["available"] is True
-    assert body["processes"]["reason_code"] is None
+    assert body["chats"]["available"] is True
+    assert body["chats"]["reason_code"] is None
 
 
-def test_processes_that_cannot_be_listed_name_their_code(tmp_path, bd):
+def test_chats_that_cannot_be_listed_name_their_code(tmp_path, bd):
     space = FakeSpace(tmp_path / "u1")
     space.context_manager = None
     root = project(space)
 
-    processes = TestClient(make_app({"u1": space})).get(f"/api/projects/{root.id}/map").json()["processes"]
+    chats = TestClient(make_app({"u1": space})).get(
+        f"/api/projects/{root.id}/map"
+    ).json()["chats"]
 
-    assert processes["available"] is False
-    assert processes["reason_code"] == map_api.ReasonCode.NO_CHATS.value
-    assert processes["reason"] == map_api.REASON_TEXT[map_api.ReasonCode.NO_CHATS]
-    assert processes["items"] == [] and processes["total"] == 0
+    assert chats["available"] is False
+    assert chats["reason_code"] == map_api.ReasonCode.NO_CHATS.value
+    assert chats["reason"] == map_api.REASON_TEXT[map_api.ReasonCode.NO_CHATS]
+    assert chats["items"] == [] and chats["total"] == 0
+    assert "processes" not in chats
 
 
 def test_files_that_are_not_a_folder_name_their_code(tmp_path, bd):
@@ -1291,7 +1566,7 @@ def test_the_map_reads_a_real_tracker_through_the_servers_own_app(tmp_path):
     dependent = next(item for item in tasks["items"] if item["id"] == created[1]["id"])
     assert dependent["depends_on"] == [created[0]["id"]]
     assert [item["name"] for item in body["files"]["items"]] == ["notes.md"]
-    assert [item["chat_id"] for item in body["processes"]["items"]] == ["chat-e2e"]
+    assert [item["chat_id"] for item in body["chats"]["items"]] == ["chat-e2e"]
     # The read went through a temporary copy: the project is as it was.
     assert state(directory) == before, "the map changed the project it read"
     assert not (directory / ".dolt").exists()
@@ -1361,3 +1636,342 @@ def test_map_check_fails_loudly_when_there_is_no_tracker(tmp_path, capsys):
     assert "reason_code:  no_tracker" in out
     assert "project_tree: unchanged" in out
     assert (directory / "notes.md").read_text(encoding="utf-8") == "kept"
+
+
+# -- a chat's lazy detail --------------------------------------------------------
+
+#: A payload that lives only in metadata, a trace body or a run's own preview.
+SECRET = "SECRET-payload-that-never-leaves"
+
+
+def step(step_id, kind, title, *, status="done", parent_id=None, at_ms=1000,
+         duration_ms=5, refs=None, body=SECRET, subtitle=""):
+    """One stored trace step, with the raw parts the detail must never pass on."""
+    return {
+        "id": step_id,
+        "kind": kind,
+        "title": title,
+        "status": status,
+        "subtitle": subtitle,
+        "body": body,
+        "refs": refs or [],
+        "at_ms": at_ms,
+        "duration_ms": duration_ms,
+        "parent_id": parent_id,
+    }
+
+
+def stored(role, preview, *, message_id=None, timestamp="2026-01-01T00:00:00Z",
+           kind=None, turn_id=None, trace=None, has_image=False):
+    """One message as ``get_context_messages`` answers it (metadata included)."""
+    metadata = {}
+    if message_id is not None:
+        metadata["message_id"] = message_id
+    if kind is not None:
+        metadata["kind"] = kind
+    if turn_id is not None:
+        metadata["turn_id"] = turn_id
+    if trace is not None:
+        metadata["trace"] = trace
+    return {
+        "role": role,
+        "timestamp": timestamp,
+        "metadata": metadata,
+        "preview": preview,
+        "has_image": has_image,
+    }
+
+
+def run(agent, start, end, *, turn_id=None, error=None, context_id="chat-1"):
+    """One run as ``get_context_executions`` answers it (previews included)."""
+    return {
+        "agent_name": agent,
+        "start_time": start,
+        "end_time": end,
+        "context_id": context_id,
+        "error": error,
+        "input_preview": SECRET,
+        "output_preview": SECRET,
+        "input_length": len(SECRET),
+        "output_length": len(SECRET),
+        "has_error": bool(error),
+        **({"turn_id": turn_id} if turn_id is not None else {}),
+    }
+
+
+def detail(client, project_id, chat_id="chat-1", **kwargs):
+    return client.get(f"/api/projects/{project_id}/map/chats/{chat_id}", **kwargs)
+
+
+def test_the_chat_detail_is_the_safe_hierarchy_of_one_chat(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id, title="First chat")]
+    trace = [
+        step("s-msg", "message", "Answer", subtitle="I will look at the tests."),
+        step("s-tool", "tool", "Read a file",
+             refs=[{"kind": "file", "label": "src/a.py", "detail": "src/a.py"}]),
+        step("s-agent", "agent", "Delegate the check", at_ms=2000),
+        step("s-child", "tool", "Run the tests", parent_id="s-agent", at_ms=2100),
+    ]
+    space.messages["chat-1"] = [
+        stored("user", "Please check the tests", message_id="m-user"),
+        stored("assistant", "Done", message_id="m-assistant", kind="agent_response",
+               turn_id="t-1", trace=trace),
+    ]
+    space.executions["chat-1"] = [run("dev", 100.0, 101.5, turn_id="t-1")]
+
+    body = detail(client, root.id).json()
+
+    assert body["chat"] == {
+        "id": "chat-1", "title": "First chat", "href": "/?conversation=chat-1",
+    }
+    assert [m["role"] for m in body["messages"]["items"]] == ["user", "assistant"]
+    assistant = body["messages"]["items"][1]
+    assert assistant["id"] == "m-assistant"
+    assert assistant["turn_id"] == "t-1"
+    assert assistant["kind"] == "agent_response"
+    assert assistant["has_image"] is False
+    assert len(assistant["preview"]) <= 180
+    assert body["messages"]["total"] == 2
+    assert body["messages"]["truncated"] is False
+
+    assert body["executions"]["items"] == [{
+        "id": "turn:t-1", "turn_id": "t-1", "agent": "dev", "status": "done",
+        "start_time": 100.0, "end_time": 101.5, "duration_ms": 1500, "error": False,
+    }]
+    assert body["executions"]["total"] == 1
+
+    ops = {op["id"]: op for op in body["operations"]["items"]}
+    assert list(ops) == ["s-msg", "s-tool", "s-agent", "s-child"]
+    assert ops["s-agent"]["kind"] == "agent"
+    assert ops["s-child"]["parent_id"] == "s-agent"
+    assert ops["s-tool"]["parent_id"] is None
+    assert ops["s-tool"]["files"] == ["src/a.py"]
+    assert ops["s-msg"]["summary"] == "I will look at the tests."
+    assert {op["execution_id"] for op in ops.values()} == {"turn:t-1"}
+    assert body["operations"]["total"] == 4
+    assert body["operations"]["truncated"] is False
+
+
+def test_the_detail_never_carries_a_payload_or_raw_metadata(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    trace = [
+        step("s-tool", "tool", "Read", subtitle=SECRET, body=SECRET, refs=[
+            {"kind": "file", "label": "/etc/passwd", "detail": "/etc/passwd"},
+            {"kind": "file", "label": "user/notes.md", "detail": "user/notes.md"},
+            {"kind": "file", "label": "src/ok.py", "detail": "src/ok.py"},
+        ]),
+    ]
+    space.messages["chat-1"] = [stored(
+        "assistant", "Read it", message_id="m-a", turn_id="t-1", kind="agent_response",
+        trace=trace,
+    )]
+    space.executions["chat-1"] = [run("dev", 1.0, 2.0, turn_id="t-1", error=SECRET)]
+
+    response = detail(client, root.id)
+
+    assert response.status_code == 200
+    assert SECRET not in response.text
+    body = response.json()
+    assert "metadata" not in body
+    operation = body["operations"]["items"][0]
+    assert operation["files"] == ["src/ok.py"]  # no absolute or foreign ref survives
+    assert operation["summary"] == ""  # a tool step's subtitle is never narration
+    assert body["executions"]["items"][0]["error"] is True
+    assert "prompt" not in response.text and "token" not in response.text
+
+
+def test_a_legacy_message_owns_its_own_operations(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    space.messages["chat-1"] = [
+        stored("assistant", "old answer", message_id="m-old",
+               trace=[step("legacy-0", "tool", "Old step")]),
+    ]
+    space.executions["chat-1"] = [run("dev", 5.0, 6.0)]  # stored before turn ids
+
+    body = detail(client, root.id).json()
+
+    run_ids = [item["id"] for item in body["executions"]["items"]]
+    assert run_ids == ["legacy:chat-1:0:5", "message:m-old"]
+    assert body["executions"]["items"][0]["turn_id"] is None
+    assert body["executions"]["items"][1]["turn_id"] is None
+    # No run is guessed from the neighbour: the message owns its own trace.
+    assert body["operations"]["items"][0]["execution_id"] == "message:m-old"
+
+
+def test_a_message_without_a_stored_id_gets_a_stable_position(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    space.messages["chat-1"] = [stored("system", "the rules", timestamp="")]
+
+    body = detail(client, root.id).json()
+
+    assert body["messages"]["items"][0]["id"] == "message:0"
+    assert body["messages"]["items"][0]["time"] is None
+    assert body["messages"]["items"][0]["kind"] is None
+
+
+def test_the_detail_bounds_each_section_and_says_so(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    space.messages["chat-1"] = [
+        stored("user" if index % 2 == 0 else "assistant", f"message {index}",
+               message_id=f"m-{index}")
+        for index in range(40)
+    ]
+    space.executions["chat-1"] = [
+        run("dev", float(index), float(index) + 0.5, turn_id=f"t-{index}")
+        for index in range(35)
+    ]
+    space.messages["chat-1"].append(stored(
+        "assistant", "big", message_id="m-big", turn_id="t-big",
+        trace=[step(f"s-{index}", "tool", f"Step {index}") for index in range(120)],
+    ))
+    space.executions["chat-1"].append(run("dev", 100.0, 101.0, turn_id="t-big"))
+
+    body = detail(client, root.id).json()
+
+    assert len(body["messages"]["items"]) == 30
+    assert body["messages"]["total"] == 41 and body["messages"]["truncated"] is True
+    assert len(body["executions"]["items"]) == 30
+    assert body["executions"]["total"] == 36 and body["executions"]["truncated"] is True
+    assert len(body["operations"]["items"]) == 100
+    assert body["operations"]["total"] == 120 and body["operations"]["truncated"] is True
+    # Every shown operation still names a run the answer holds.
+    shown_runs = {item["id"] for item in body["executions"]["items"]}
+    assert {op["execution_id"] for op in body["operations"]["items"]} <= shown_runs
+
+
+def test_unknown_roles_kinds_and_parents_degrade(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    trace = [
+        step("s-orphan", "tool", "Orphan", parent_id="not-in-this-trace"),
+        {"id": "s-unknown", "kind": "mystery", "title": "Nope", "status": "done"},
+        step("s-self", "tool", "Self", parent_id="s-self"),
+        {"id": "s-no-title", "kind": "tool", "title": "", "status": "done"},
+        {"id": "../bad id", "kind": "tool", "title": "Bad", "status": "done"},
+    ]
+    space.messages["chat-1"] = [
+        stored("tool", SECRET, message_id="m-unknown-role"),
+        stored("moderator", "moderation", message_id="m-odd"),
+        stored("assistant", "answer", message_id="m-a", turn_id="t-1", trace=trace),
+    ]
+    space.executions["chat-1"] = [run("dev", 1.0, 2.0, turn_id="t-1")]
+
+    response = detail(client, root.id)
+    body = response.json()
+
+    roles = [item["role"] for item in body["messages"]["items"]]
+    assert roles == ["other", "other", "assistant"]
+    for item in body["messages"]["items"][:2]:
+        assert item["preview"] == "" and item["kind"] is None and item["has_image"] is False
+    assert SECRET not in response.text
+
+    ops = {op["id"]: op for op in body["operations"]["items"]}
+    assert set(ops) == {"s-orphan", "s-self"}
+    assert ops["s-orphan"]["parent_id"] is None
+    assert ops["s-self"]["parent_id"] is None
+
+
+def test_an_agent_step_nests_its_children_only_when_it_is_shown(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    trace = [
+        step(f"s-{index}", "tool", f"Step {index}") for index in range(99)
+    ] + [
+        step("s-agent", "agent", "Delegate", at_ms=5000),
+        step("s-child", "tool", "Child", parent_id="s-agent", at_ms=5001),
+    ]
+    space.messages["chat-1"] = [
+        stored("assistant", "answer", message_id="m-a", turn_id="t-1", trace=trace),
+    ]
+    space.executions["chat-1"] = [run("dev", 1.0, 2.0, turn_id="t-1")]
+
+    body = detail(client, root.id).json()
+
+    ops = {op["id"]: op for op in body["operations"]["items"]}
+    assert body["operations"]["total"] == 101 and body["operations"]["truncated"] is True
+    assert "s-0" not in ops  # the oldest step fell outside the cap
+    assert ops["s-1"]["id"] == "s-1"
+    assert ops["s-child"]["parent_id"] == "s-agent"
+
+
+def test_the_detail_answers_404_for_a_foreign_or_unknown_chat(client, space, bd):
+    root = project(space)
+    space._views = [
+        view("chat-own", root.id),
+        view("chat-elsewhere", "prj-00000000-other"),
+    ]
+    space.messages["chat-elsewhere"] = [stored("user", "theirs", message_id="m-x")]
+
+    for chat_id in ("chat-elsewhere", "chat-unknown"):
+        response = detail(client, root.id, chat_id)
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Chat not found"}
+
+
+def test_another_users_chat_is_not_found(tmp_path, bd, space):
+    theirs = FakeSpace(tmp_path / "u2")
+    their_project = project(theirs, "Theirs")
+    theirs._views = [view("chat-theirs", their_project.id)]
+    theirs.messages["chat-theirs"] = [stored("user", "theirs", message_id="m-t")]
+    theirs.executions["chat-theirs"] = [run("dev", 1.0, 2.0)]
+    client = TestClient(make_app({"u1": space, "u2": theirs}))
+    mine = project(space, "Mine")
+
+    # The chat id is real, but under my space and my project it does not exist.
+    assert detail(client, mine.id, "chat-theirs", headers={"x-user": "u1"}).status_code == 404
+    assert detail(
+        client, their_project.id, "chat-theirs", headers={"x-user": "u1"}
+    ).status_code == 404  # their project id is not in my store
+    assert detail(
+        client, their_project.id, "chat-theirs", headers={"x-user": "u2"}
+    ).status_code == 200
+
+
+def test_the_detail_requires_an_identified_user(client, space):
+    root = project(space)
+    response = detail(client, root.id, headers={"x-user": "stranger"})
+    assert response.status_code == 401
+
+
+def test_the_detail_revalidates_with_its_etag(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    space.messages["chat-1"] = [stored("user", "hello", message_id="m-u")]
+
+    first = detail(client, root.id)
+    etag = first.headers["etag"]
+    assert etag
+    again = detail(client, root.id, headers={"If-None-Match": etag})
+    assert again.status_code == 304
+
+
+def test_the_lightweight_map_is_unchanged_by_the_detail(client, space, bd):
+    root = project(space)
+    space._views = [view("chat-1", root.id)]
+    space.messages["chat-1"] = [stored("assistant", "answer", message_id="m-a", turn_id="t-1",
+                                       trace=[step("s-1", "tool", "One")])]
+    space.executions["chat-1"] = [run("dev", 1.0, 2.0, turn_id="t-1")]
+
+    body = client.get(f"/api/projects/{root.id}/map").json()
+    item = body["chats"]["items"][0]
+
+    # The map lists a chat's summary only, never its transcript or its activity.
+    assert [entry["chat_id"] for entry in body["chats"]["items"]] == ["chat-1"]
+    assert set(item) == {
+        "chat_id", "title", "updated_at", "active", "awaiting_approval",
+        "task_links", "task_links_total", "task_link_counts",
+    }
+    assert "messages" not in item and "executions" not in item and "activity" not in item
+    assert "s-1" not in json.dumps(body)
+
+    # The detail is a second read: it carries what the map left out, and it
+    # leaves the lightweight answer exactly as it was.
+    detail_body = detail(client, root.id).json()
+    assert [message["id"] for message in detail_body["messages"]["items"]] == ["m-a"]
+    assert [operation["id"] for operation in detail_body["operations"]["items"]] == ["s-1"]
+    assert client.get(f"/api/projects/{root.id}/map").json() == body

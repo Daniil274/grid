@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <title>Grid map · Grid</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/static/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
   <link rel="stylesheet" href="/static/styles/tokens.css">
   <link rel="stylesheet" href="/static/styles/base.css">
   <link rel="stylesheet" href="/static/styles/grid.css">
@@ -15,16 +18,31 @@
       <div>
         <a href="/" class="gridBrand">GRID / MAP</a>
         <h1 id="grid-title">Project map</h1>
-        <p>The project as it stands: its goals and tasks, the chats working on it, and what those chats left in the project's space. The map does not rearrange itself: a task keeps its place while its state changes.</p>
+        <p>Your project as a cutaway Office: tasks on the back wall, chat desks with seated workers, files on the shelves and explicit closure reports. Select a desk for its real sessions and tools; figures represent chats, not a guessed agent roster. Read-only snapshots, not a simulation. Readable Layers, Timeline, Space and Map remain available; narrow screens, reduced motion and browsers without WebGL open in Layers.</p>
       </div>
       <div class="gridActions">
+        <label class="gridViewSwitch" for="grid-view">
+          <span class="gridViewSwitch__label">View</span>
+          <select id="grid-view" class="gridViewSwitch__select" name="view" title="Office view">
+            <option value="office" selected>Office</option>
+            <option value="layers">Layers</option>
+            <option value="space">Space</option>
+            <option value="timeline">Timeline</option>
+            <option value="map">Map</option>
+          </select>
+        </label>
         <button id="grid-refresh" class="btn btn--ghost" type="button">Refresh</button>
       </div>
     </header>
     <nav id="grid-breadcrumb" class="gridCrumbs" aria-label="Project path"></nav>
     <div id="grid-status" class="gridStatus" role="status" aria-live="polite">Loading the map…</div>
     <div class="gridBody">
-      <div id="grid-map" class="gridMap__viewport" aria-label="Map of the project"></div>
+      <div class="gridStage">
+        <div id="grid-map" class="gridMap__viewport" aria-label="Map of the project"></div>
+        <div id="grid-space" class="gridSpace__viewport" aria-label="Space of the project" aria-hidden="true" hidden></div>
+        <div id="grid-office" class="gridOffice__viewport" aria-label="Cutaway office of the project" aria-hidden="true" hidden></div>
+        <div id="grid-projection" class="gridProjection__viewport" aria-label="Layers and timeline of the project" aria-hidden="true" hidden></div>
+      </div>
       <aside id="grid-overview" class="gridOverview" aria-label="Overview"></aside>
     </div>
   </main>

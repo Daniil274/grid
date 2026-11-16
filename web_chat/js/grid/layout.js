@@ -10,9 +10,9 @@
  *   yields the same coordinates;
  * - a status change therefore never moves a task, and a new task (which is the
  *   newest by `created_at`) is appended after the ones already there.
- * - processes are ordered by chat id, so a chat keeps its place as it starts
- *   and stops working; its card shows the last step it took, and a new step
- *   never changes the card's size.
+ * - the chats (the API calls them `chats`; the region is the "processes" one)
+ *   are ordered by chat id, so a chat keeps its place as it starts and stops
+ *   working, and what it did never changes the card's size.
  *
  * Everything here is arithmetic on plain objects: no DOM, no measurement, no
  * clock. That is what tests/grid_map.test.mjs pins down.
@@ -30,8 +30,8 @@ const MARGIN = 28;
 /** The node sizes of each region. */
 export const NODE_SIZE = {
   tasks: { width: 156, height: 64 },
-  // Tall enough for a title, the run state, the last step and the link count.
-  // The height is a constant, so a new step never moves a card.
+  // Tall enough for a title, the run state and the link count. The height is a
+  // constant, so nothing the chat does moves a card.
   processes: { width: 184, height: 92 },
   files: { width: 184, height: 52 },
 };
@@ -59,6 +59,20 @@ export function orderProcesses(items = []) {
   return [...items].sort(
     (a, b) => text(a?.chat_id).localeCompare(text(b?.chat_id)) || text(a?.title).localeCompare(text(b?.title)),
   );
+}
+
+/**
+ * The map's chat section. The API names it `chats`; a server that still names
+ * it `processes` is read too, so an older answer never blanks the region.
+ */
+export function chatsSection(map) {
+  return map?.chats ?? map?.processes ?? null;
+}
+
+/** The chats of the map answer, in the order the server sent them. */
+export function mapChats(map) {
+  const section = chatsSection(map);
+  return Array.isArray(section?.items) ? section.items : [];
 }
 
 /** Files with the directories first, then by name. */
@@ -107,7 +121,7 @@ function place(count, columns, size, origin) {
  */
 export function layoutMap(map = {}) {
   const tasks = orderTasks(Array.isArray(map?.tasks?.items) ? map.tasks.items : []);
-  const processes = orderProcesses(Array.isArray(map?.processes?.items) ? map.processes.items : []);
+  const processes = orderProcesses(mapChats(map));
   const files = orderFiles(Array.isArray(map?.files?.items) ? map.files.items : []);
 
   const taskColumns = columnsFor(REGIONS.tasks.width, NODE_SIZE.tasks);

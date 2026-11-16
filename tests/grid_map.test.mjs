@@ -57,23 +57,20 @@ function sampleMap(overrides = {}) {
       truncated: false,
       counts: { ready: 1, in_progress: 1, blocked: 1 },
     },
-    processes: {
+    chats: {
       items: [
         {
           chat_id: "c1", title: "Chat one", updated_at: "2026-10-04T10:00:00Z", active: true, awaiting_approval: false,
-          steps: ["read the map answer", "drew the process cards"],
           task_links: [{ task_id: "bd-1", relation: "turn" }, { task_id: "bd-2", relation: "plan" }],
           task_links_total: 2,
         },
         {
           chat_id: "c2", title: "Chat two", updated_at: "2026-10-04T11:00:00Z", active: true, awaiting_approval: true,
-          steps: [{ title: "asked for approval" }],
           task_links: [{ task_id: "bd-2", relation: "turn" }],
           task_links_total: 7,
         },
         {
           chat_id: "c3", title: "Chat three", updated_at: "2026-10-03T11:00:00Z", active: false, awaiting_approval: false,
-          steps: ["closed the loop", "wrote the tests"],
           task_links: [],
           task_links_total: 0,
         },
@@ -157,7 +154,7 @@ test("dependency and work routes do not depend on input list order", () => {
   const first = layoutMap(stressMap());
   const reversed = stressMap();
   reversed.tasks.items.forEach((task) => task.depends_on?.reverse());
-  reversed.processes.items.forEach((chat) => chat.task_links?.reverse());
+  reversed.chats.items.forEach((chat) => chat.task_links?.reverse());
   assert.deepEqual(layoutMap(reversed).edges, first.edges);
   assert.deepEqual(layoutMap(reversed).links, first.links);
 });
@@ -205,7 +202,7 @@ test("three fixed regions: tasks, processes and files", () => {
   assert.ok(tasks.x < processes.x, "processes sit beside the tasks");
   assert.ok(files.y > processes.y, "files sit under the processes");
   // The regions do not move when the project has more or fewer items.
-  const empty = layoutMap({ tasks: { available: true, items: [] }, processes: { items: [] }, files: { available: true, items: [] } });
+  const empty = layoutMap({ tasks: { available: true, items: [] }, chats: { items: [] }, files: { available: true, items: [] } });
   assert.deepEqual(empty.regions.tasks.x, tasks.x);
   assert.deepEqual(empty.regions.processes.y, processes.y);
 });
@@ -285,41 +282,39 @@ const processPlaces = (geometry) =>
 const processCard = (root, chatId) =>
   nodesOf(root, "gridNode--process").find((node) => node.getAttribute("href") === `/?conversation=${chatId}`);
 
-test("a process card carries the last real step and the number of linked tasks", () => {
+test("a chat card carries its status and the number of linked tasks, no step", () => {
   const root = el("div");
   renderMap(root, sampleMap(), { projectId: "p1" });
 
   const working = processCard(root, "c1");
-  assert.match(textOf(working), /Active: drew the process cards/, "the last step, phrased as work in progress");
-  assert.doesNotMatch(textOf(working), /read the map answer/, "only the last step, not the whole trace");
+  assert.match(textOf(working), /Active/);
   assert.match(textOf(working), /2 tasks/);
-  assert.match(working.getAttribute("title"), /Active: drew the process cards/);
   assert.match(working.getAttribute("title"), /2 tasks/);
+  assert.doesNotMatch(working.getAttribute("title"), /Active:/, "no step is said");
+  assert.equal(working.findAll("gridNode__step").length, 0, "the map's chats carry no steps");
 
-  // A step may be an object carrying its title; the server's total counts more
-  // links than the visible cards show.
+  // The server's total counts more links than the visible cards show.
   const waiting = processCard(root, "c2");
-  assert.match(textOf(waiting), /Active: asked for approval/);
+  assert.match(textOf(waiting), /Awaiting approval/);
   assert.match(textOf(waiting), /7 tasks/);
 
   const idle = processCard(root, "c3");
-  assert.match(textOf(idle), /Last: wrote the tests/, "a chat that rests shows its last step as the last one");
+  assert.match(textOf(idle), /Idle/);
   assert.doesNotMatch(textOf(idle), /\d+ tasks/, "a chat with no link says nothing about tasks");
   assert.equal(idle.findAll("gridNode__links").length, 0);
 });
 
-test("a new step changes the words of a card, never its place or size", () => {
+test("a new link changes the words of a card, never its place or size", () => {
   const before = layoutMap(sampleMap());
   const later = sampleMap();
-  const chat = later.processes.items[0];
-  chat.steps.push("a much longer step that names a file, a task and an acceptance criterion in full");
+  const chat = later.chats.items[0];
   chat.active = false;
   chat.awaiting_approval = false;
   chat.task_links = Array.from({ length: 40 }, (_, index) => ({ task_id: `bd-${index}`, relation: "plan" }));
   chat.task_links_total = 40;
   const after = layoutMap(later);
 
-  assert.deepEqual(processPlaces(after), processPlaces(before), "activity and its steps move nothing");
+  assert.deepEqual(processPlaces(after), processPlaces(before), "the links move nothing");
   assert.deepEqual(after.regions.processes, before.regions.processes);
   assert.deepEqual(
     after.nodes.tasks.map((node) => `${node.x},${node.y}`),
@@ -329,14 +324,14 @@ test("a new step changes the words of a card, never its place or size", () => {
 
   const root = el("div");
   renderMap(root, later, { projectId: "p1" });
-  assert.match(textOf(processCard(root, "c1")), /Last: a much longer step/);
   assert.match(textOf(processCard(root, "c1")), /40 tasks/);
+  assert.doesNotMatch(textOf(processCard(root, "c1")), /Last:/);
 });
 
 test("a process card reads the server's own split of its links", () => {
   const map = sampleMap();
-  map.processes.items[0].task_link_counts = { turn: 2, plan: 1 };
-  map.processes.items[1].task_link_counts = { turn: 1, plan: 0 };
+  map.chats.items[0].task_link_counts = { turn: 2, plan: 1 };
+  map.chats.items[1].task_link_counts = { turn: 1, plan: 0 };
   const root = el("div");
   renderMap(root, map, { projectId: "p1" });
   const working = processCard(root, "c1");
@@ -351,9 +346,9 @@ test("a process card reads the server's own split of its links", () => {
 test("unknown counts fall back to the total; a known empty split says nothing", () => {
   const map = sampleMap();
   // Half a split is not a split: nothing is invented about the missing half.
-  map.processes.items[0].task_link_counts = { turn: 2 };
-  map.processes.items[1].task_link_counts = null;
-  map.processes.items.push({
+  map.chats.items[0].task_link_counts = { turn: 2 };
+  map.chats.items[1].task_link_counts = null;
+  map.chats.items.push({
     chat_id: "c4", title: "Chat four", active: false, awaiting_approval: false,
     task_links: [], task_links_total: 5, task_link_counts: { turn: 0, plan: 0 },
   });
@@ -402,7 +397,7 @@ test("the map carries a key to its lines, and every line has a direction", () =>
 
 test("links join a task to a chat only where both are on the map, once per pair", () => {
   const map = sampleMap();
-  map.processes.items[0].task_links = [
+  map.chats.items[0].task_links = [
     { task_id: "bd-1", relation: "plan" },
     { task_id: "bd-1", relation: "turn" }, // the same pair again: one line, the turn wins
     { task_id: "bd-2", relation: "plan" },
@@ -410,7 +405,7 @@ test("links join a task to a chat only where both are on the map, once per pair"
     { task_id: "bd-3", relation: "invented" }, // not a relation the server sends
     { task_id: "bd-3", relation: "constructor" }, // a name borrowed from Object is not one either
   ];
-  map.processes.items[1].task_links = [{ task_id: "bd-3", relation: "turn" }];
+  map.chats.items[1].task_links = [{ task_id: "bd-3", relation: "turn" }];
 
   const geometry = layoutMap(map);
   assert.deepEqual(
@@ -438,7 +433,7 @@ test("links join a task to a chat only where both are on the map, once per pair"
 
   // A map whose chats name nothing gets no links at all.
   const quiet = sampleMap();
-  for (const chat of quiet.processes.items) chat.task_links = [];
+  for (const chat of quiet.chats.items) chat.task_links = [];
   assert.deepEqual(layoutMap(quiet).links, []);
 });
 
@@ -501,7 +496,6 @@ function stressMap() {
       title: `Chat ${index}`,
       active: index % 2 === 0,
       awaiting_approval: false,
-      steps: [`step ${index}`],
       task_links: tasks
         .slice(index, index + 6)
         .map((task, offset) => ({ task_id: task.id, relation: offset % 2 ? "plan" : "turn" })),
@@ -511,7 +505,7 @@ function stressMap() {
   }
   return sampleMap({
     tasks: { available: true, reason: null, items: tasks, total: tasks.length, truncated: false },
-    processes: { items: chats, total: chats.length, truncated: false },
+    chats: { items: chats, total: chats.length, truncated: false },
   });
 }
 
@@ -621,7 +615,7 @@ test("a same-row dependency and a link out of one task leave by different ports"
       total: 2,
       truncated: false,
     },
-    processes: {
+    chats: {
       items: [{ chat_id: "c0", title: "Chat", task_links: [{ task_id: "bd-1", relation: "turn" }] }],
       total: 1,
       truncated: false,
@@ -654,7 +648,7 @@ test("a same-row dependency and a link out of one task leave by different ports"
   // The same answer whatever order the server listed the cards in.
   const shuffled = clone(map);
   shuffled.tasks.items.reverse();
-  shuffled.processes.items.reverse();
+  shuffled.chats.items.reverse();
   assert.deepEqual(layoutMap(shuffled).edges, geometry.edges);
   assert.deepEqual(layoutMap(shuffled).links, geometry.links);
 });
@@ -662,8 +656,7 @@ test("a same-row dependency and a link out of one task leave by different ports"
 test("the geometry of a stress map stays the same when a chat works", () => {
   const before = layoutMap(stressMap());
   const later = stressMap();
-  later.processes.items[0].active = true;
-  later.processes.items[0].steps.push("a much longer step that names three tasks at once");
+  later.chats.items[0].active = true;
   const after = layoutMap(later);
   assert.deepEqual(
     after.nodes.tasks.map((node) => `${node.id}:${node.x},${node.y}`),
@@ -679,7 +672,7 @@ test("the geometry of a stress map stays the same when a chat works", () => {
 
 test("no step and no link is invented for a chat that has none", () => {
   const map = sampleMap();
-  map.processes.items = [{ chat_id: "c9", title: "Quiet chat", active: false, awaiting_approval: false }];
+  map.chats.items = [{ chat_id: "c9", title: "Quiet chat", active: false, awaiting_approval: false }];
   assert.deepEqual(layoutMap(map).links, []);
 
   const root = el("div");
@@ -691,21 +684,78 @@ test("no step and no link is invented for a chat that has none", () => {
   assert.match(textOf(card), /Idle/);
 });
 
-test("the overview names the same last step and count for a working chat", () => {
+test("the overview names the same working chats and counts as the cards", () => {
   const overview = el("div");
   renderOverview(overview, sampleMap(), { projectId: "p1" });
-  assert.match(textOf(overview), /Active: drew the process cards/);
+  assert.match(textOf(overview), /Chat one/);
   assert.match(textOf(overview), /2 tasks/);
-  assert.match(textOf(overview), /Active: asked for approval/);
+  assert.match(textOf(overview), /Chat two/);
   assert.match(textOf(overview), /7 tasks/);
-  // The overview names what is working, not every chat of the project.
-  assert.doesNotMatch(textOf(overview), /wrote the tests/);
+  // The overview names what is working, not every chat of the project, and it
+  // says no step: the map's chats carry none.
+  assert.doesNotMatch(textOf(overview), /Chat three/);
+  assert.doesNotMatch(textOf(overview), /Active:|Last:/);
+});
+
+test("a legacy steps array on a chat is not drawn", () => {
+  const map = sampleMap();
+  map.chats.items[0].steps = ["read the map answer", "drew the process cards"];
+  const root = el("div");
+  renderMap(root, map, { projectId: "p1" });
+  const overview = el("div");
+  renderOverview(overview, map, { projectId: "p1" });
+
+  const card = processCard(root, "c1");
+  assert.equal(card.findAll("gridNode__step").length, 0, "the map's chats carry no steps");
+  assert.doesNotMatch(textOf(card), /read the map answer/);
+  assert.doesNotMatch(card.getAttribute("title"), /drew the process cards/);
+  assert.doesNotMatch(textOf(overview), /read the map answer/);
+});
+
+test("the map is built from the canonical chats section", () => {
+  const map = sampleMap();
+  assert.equal(map.chats.items.length, 3);
+  assert.equal(map.processes, undefined, "the retired key is not what the page reads");
+  const geometry = layoutMap(map);
+  assert.equal(geometry.nodes.processes.length, 3, "one card per chat of the answer");
+  assert.equal(geometry.links.length, 3, "the links the chats name");
+
+  const root = el("div");
+  renderMap(root, map, { projectId: "p1" });
+  assert.deepEqual(
+    nodesOf(root, "gridNode--process").map((node) => node.dataset.chat),
+    ["c1", "c2", "c3"],
+    "each card is one chat of the answer",
+  );
+});
+
+test("an unavailable chats section says so instead of an empty region", () => {
+  const map = sampleMap();
+  map.chats = {
+    available: false,
+    reason: "This project's chats cannot be listed on this server.",
+    reason_code: "no_chats",
+    items: [],
+    total: 0,
+    truncated: false,
+    counts: { active: 0, awaiting_approval: 0 },
+  };
+  const root = el("div");
+  renderMap(root, map, { projectId: "p1" });
+  const region = root.findAll("gridMap__region").find((box) => box.dataset.region === "processes");
+  assert.match(textOf(region), /No data: This project's chats cannot be listed/);
+  assert.equal(nodesOf(root, "gridNode--process").length, 0);
+  assert.equal(root.findAll("gridMap__link").length, 0, "no links to cards that are not drawn");
+
+  const overview = el("div");
+  renderOverview(overview, map, { projectId: "p1" });
+  assert.match(textOf(overview), /No data: This project's chats cannot be listed/);
 });
 
 test("the overview lists the real connections as words, and none it cannot draw", () => {
   const map = sampleMap();
-  map.processes.items[0].task_links = [
-    ...map.processes.items[0].task_links,
+  map.chats.items[0].task_links = [
+    ...map.chats.items[0].task_links,
     { task_id: "bd-404", relation: "turn" },
     { task_id: "bd-1", relation: "depends" },
   ];
@@ -740,14 +790,14 @@ test("the connection list is bounded and says how much of it is shown", () => {
     depends_on: [],
   }));
   map.tasks = { available: true, items: tasks, total: 20, truncated: false };
-  map.processes.items = [
+  map.chats.items = [
     {
-      chat_id: "c1", title: "Chat one", active: true, awaiting_approval: false, steps: ["s"],
+      chat_id: "c1", title: "Chat one", active: true, awaiting_approval: false,
       task_links: tasks.slice(0, 16).map((task) => ({ task_id: task.id, relation: "turn" })),
       task_links_total: 16,
     },
     {
-      chat_id: "c2", title: "Chat two", active: true, awaiting_approval: false, steps: ["s"],
+      chat_id: "c2", title: "Chat two", active: true, awaiting_approval: false,
       task_links: tasks.slice(16).map((task) => ({ task_id: task.id, relation: "plan" })),
       task_links_total: 4,
     },
@@ -760,11 +810,32 @@ test("the connection list is bounded and says how much of it is shown", () => {
 
 test("with no real connection the overview claims none", () => {
   const map = sampleMap();
-  for (const chat of map.processes.items) chat.task_links = [];
+  for (const chat of map.chats.items) chat.task_links = [];
   const overview = el("div");
   renderOverview(overview, map, { projectId: "p1" });
   assert.doesNotMatch(textOf(overview), /Connections/);
   assert.equal(nodesOf(overview, "gridOverview__connection").length, 0);
+});
+
+test("an unavailable section hides its routes but keeps recorded Connections readable", () => {
+  const map = sampleMap();
+  map.tasks.available = false;
+  map.tasks.reason = "Tracker unavailable";
+  const geometry = layoutMap(map);
+  // The answer still carries the items it recorded: three tasks and the three
+  // task/chat links the chats name. Availability gates the drawing, not data.
+  assert.equal(geometry.nodes.tasks.length, map.tasks.items.length);
+  assert.equal(geometry.nodes.tasks.length, 3);
+  assert.equal(geometry.links.length, 3);
+  const viewport = el("div");
+  renderMap(viewport, map, { projectId: "p1" });
+  assert.equal(nodesOf(viewport, "gridMap__edge").length, 0);
+  assert.equal(nodesOf(viewport, "gridMap__link").length, 0);
+  const overview = el("div");
+  renderOverview(overview, map, { projectId: "p1" });
+  // The recorded connections stay readable as words even when nothing is drawn.
+  assert.equal(nodesOf(overview, "gridOverview__connection").length, 3);
+  assert.match(textOf(overview), /Tracker unavailable/);
 });
 
 test("a result is not a link when the server names no files_url", () => {
@@ -891,7 +962,7 @@ test("with no project the page is a picker of projects", () => {
 test("text from the server lands as text, never as markup", () => {
   const map = sampleMap();
   map.tasks.items[0].title = '<img src=x onerror="alert(1)">';
-  map.processes.items[0].title = "<script>alert(1)</script>";
+  map.chats.items[0].title = "<script>alert(1)</script>";
   const root = el("div");
   renderMap(root, map, { projectId: "p1" });
   const overview = el("div");

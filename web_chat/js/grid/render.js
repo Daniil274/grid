@@ -12,7 +12,8 @@
  */
 
 import { h, replace } from "../lib/dom.js";
-import { layoutMap } from "./layout.js";
+import { chatsSection, layoutMap, mapChats } from "./layout.js";
+import { parseFilesUrl } from "./explorer.js";
 
 /** How each state reads; the same words and marks as the tracker page. */
 export const STATES = {
@@ -40,6 +41,26 @@ const text = (value) => String(value ?? "");
 export const when = (stamp) => (stamp ? text(stamp).replace("T", " ").slice(0, 16) : "");
 
 const priorityTag = (task) => (task?.priority == null ? "" : `P${task.priority}`);
+
+/**
+ * A click on a card selects it - and the card keeps its `href`, so a modified
+ * click (a new tab, a download), a middle click or a browser without this
+ * module still opens the real thing. The inspector the page opens carries the
+ * plain "Open" link for the same destination.
+ */
+function selectProps(selection, onSelect) {
+  if (typeof onSelect !== "function") return {};
+  return {
+    on: {
+      click: (event) => {
+        if (event?.metaKey || event?.ctrlKey || event?.shiftKey || event?.altKey) return;
+        if (event?.button) return;
+        event?.preventDefault?.();
+        onSelect(selection);
+      },
+    },
+  };
+}
 
 /**
  * The files page's URL for one entry of the project's space.
@@ -243,40 +264,22 @@ function place(box, node, origin = { x: 0, y: 0 }) {
 }
 
 /** One task of the goals/tasks region: mark, title, state label. */
-export function taskNode(node, projectId, origin) {
+export function taskNode(node, projectId, origin, onSelect = null) {
   const state = stateOf(node.item);
   const priority = priorityTag(node.item);
   const box = h(
     "a.gridNode.gridNode--task",
     {
       href: taskHref(projectId, node.id),
-      dataset: { state: state.key, task: node.id },
+      dataset: { state: state.key, task: node.id, focus: `task:${node.id}` },
       title: `${node.title} · ${state.label}${priority ? ` · ${priority}` : ""}${when(node.item?.updated_at) ? ` · ${when(node.item.updated_at)}` : ""}`,
+      ...selectProps({ kind: "task", id: node.id }, onSelect),
     },
     h("span.gridNode__mark", { "aria-hidden": "true", text: state.mark }),
     h("span.gridNode__title", { text: node.title }),
     h("span.gridNode__meta", { text: state.label }),
   );
   return place(box, node, origin);
-}
-
-/**
- * The words of the last step the server traced for a chat, or "" when it
- * traced none. A step is a title - a string, or an object carrying one - and
- * is never invented: no steps, no line.
- */
-export function lastStep(chat) {
-  const steps = Array.isArray(chat?.steps) ? chat.steps : [];
-  const last = steps[steps.length - 1];
-  if (last == null) return "";
-  const words = typeof last === "string" ? last : text(last.title ?? last.text ?? last.label);
-  return words.trim();
-}
-
-/** "Active: <last step>" while the chat works, "Last: <last step>" once it rests. */
-export function stepLabel(chat) {
-  const step = lastStep(chat);
-  return step ? `${chat?.active ? "Active" : "Last"}: ${step}` : "";
 }
 
 /**
@@ -333,46 +336,49 @@ export function linkedTasksLabelFor(chat) {
 
 /**
  * One chat of the processes region: active and awaiting approval stand out,
- * and the card carries the last step the chat took and how many tasks it is
- * linked to. A step changes the words, never the card's size.
+ * and the card carries how many tasks it is linked to. A chat's steps are no
+ * longer part of the map answer - they belong to its loaded detail - so none
+ * is drawn, not even when an older answer still carries a `steps` array.
  */
-export function processNode(node, origin) {
+export function processNode(node, origin, onSelect = null) {
   const chat = node.item ?? {};
   const status = chat.awaiting_approval ? "Awaiting approval" : chat.active ? "Active" : "Idle";
-  const step = stepLabel(chat);
   const linked = linkedTasksLabelFor(chat);
   const box = h(
     "a.gridNode.gridNode--process",
     {
       href: chatHref(node.id),
-      dataset: { active: String(Boolean(chat.active)), awaiting: String(Boolean(chat.awaiting_approval)) },
-      title: `${node.title} · ${status}${step ? ` · ${step}` : ""}${linked ? ` · ${linked}` : ""}${when(chat.updated_at) ? ` · ${when(chat.updated_at)}` : ""}`,
+      dataset: {
+        active: String(Boolean(chat.active)),
+        awaiting: String(Boolean(chat.awaiting_approval)),
+        chat: node.id,
+        focus: `process:${node.id}`,
+      },
+      title: `${node.title} · ${status}${linked ? ` · ${linked}` : ""}${when(chat.updated_at) ? ` · ${when(chat.updated_at)}` : ""}`,
+      ...selectProps({ kind: "process", id: node.id }, onSelect),
     },
     h("span.gridNode__mark", { "aria-hidden": "true", text: chat.awaiting_approval ? "!" : chat.active ? "●" : "○" }),
     h("span.gridNode__title", { text: node.title }),
     h("span.gridNode__meta", { text: status }),
-    step || linked
-      ? h(
-          "span.gridNode__tail",
-          {},
-          h("span.gridNode__step", { text: step }),
-          linked ? h("span.gridNode__links", { text: linked }) : null,
-        )
-      : null,
+    linked ? h("span.gridNode__tail", {}, h("span.gridNode__links", { text: linked })) : null,
   );
   return place(box, node, origin);
 }
 
 /** One top-level entry of the project's space; a link only when files_url is known. */
-export function fileNode(node, filesUrl, origin) {
+export function fileNode(node, filesUrl, origin, onSelect = null) {
   const entry = node.item ?? {};
   const isDir = entry.kind === "dir";
   const isFile = entry.kind === "file";
   const href = fileHref(filesUrl, entry);
+  // The path the entry really names in the space: "project/docs", not "docs".
+  const root = parseFilesUrl(filesUrl)?.root ?? "";
+  const path = root ? `${root}/${text(entry.path)}` : text(entry.path);
   const spec = href ? "a.gridNode.gridNode--file" : "div.gridNode.gridNode--file";
   const props = {
-    dataset: { kind: entry.kind || "other" },
+    dataset: { kind: entry.kind || "other", file: path, focus: path ? `file:${path}` : "" },
     title: `${node.title}${isDir ? "/" : ""}${entry.size == null ? "" : ` · ${entry.size} B`}${when(entry.modified) ? ` · ${when(entry.modified)}` : ""}`,
+    ...selectProps({ kind: isDir ? "dir" : "file", path }, onSelect),
   };
   if (href) props.href = href;
   const box = h(
@@ -385,7 +391,7 @@ export function fileNode(node, filesUrl, origin) {
   return place(box, node, origin);
 }
 
-const sectionOf = (map, region) => map?.[region] ?? null;
+const sectionOf = (map, region) => (region === "processes" ? chatsSection(map) : map?.[region] ?? null);
 
 /**
  * What an operator can do about each cause, keyed by the server's typed
@@ -457,7 +463,7 @@ const truncatedNote = (section) =>
     ? h("p.gridMap__note.gridMap__note--foot", { text: `Showing ${section.items.length} of ${section.total}.` })
     : null;
 
-function regionFrame(region, geometry, map, projectId) {
+function regionFrame(region, geometry, map, projectId, onSelect) {
   const spec = geometry.regions[region];
   const section = sectionOf(map, region);
   const box = h(
@@ -485,9 +491,9 @@ function regionFrame(region, geometry, map, projectId) {
   }
   for (const node of nodes) {
     const origin = { x: spec.x, y: spec.y };
-    if (region === "tasks") box.append(taskNode(node, projectId, origin));
-    else if (region === "processes") box.append(processNode(node, origin));
-    else box.append(fileNode(node, map?.files_url, origin));
+    if (region === "tasks") box.append(taskNode(node, projectId, origin, onSelect));
+    else if (region === "processes") box.append(processNode(node, origin, onSelect));
+    else box.append(fileNode(node, map?.files_url, origin, onSelect));
   }
   const note = truncatedNote(section);
   if (note) box.append(note);
@@ -528,21 +534,31 @@ export function fitMap(viewport, plane, geometry) {
  *
  * @param {HTMLElement} container - the viewport the canvas goes into
  * @param {object} map - GET /api/projects/{id}/map
- * @param {{projectId?:string, geometry?:object}} [options]
+ * @param {{projectId?:string, geometry?:object, onSelect?:Function}} [options]
+ *   `onSelect(selection)` makes a card selectable: the click is taken and the
+ *   page decides what the inspector shows; without it a card is only a link.
  */
-export function renderMap(container, map, { projectId = "", geometry = null } = {}) {
+export function renderMap(container, map, { projectId = "", geometry = null, onSelect = null } = {}) {
   const placed = geometry ?? layoutMap(map);
   const canvas = h("div.gridMap__canvas", {
     style: { width: `${placed.width}px`, height: `${placed.height}px` },
     dataset: { map: projectId },
   });
-  canvas.append(edgesLayer(placed));
-  const links = linksLayer(placed);
+  // A recorded relation may remain readable in Connections while a section is
+  // unavailable, but a route to a card that is not rendered must not be drawn.
+  const drawTasks = map?.tasks?.available !== false;
+  const drawProcesses = chatsSection(map)?.available !== false;
+  const edgeCount = drawTasks ? placed.edges.length : 0;
+  const linkCount = drawTasks && drawProcesses ? placed.links.length : 0;
+  canvas.append(edgesLayer({ ...placed, edges: drawTasks ? placed.edges : [] }));
+  const links = linkCount ? linksLayer(placed) : null;
   if (links) canvas.append(links);
-  for (const region of ["tasks", "processes", "files"]) canvas.append(regionFrame(region, placed, map, projectId));
+  for (const region of ["tasks", "processes", "files"]) {
+    canvas.append(regionFrame(region, placed, map, projectId, onSelect));
+  }
   // The key to the lines rests in the tasks region's title band: it names the
   // strokes and moves no node.
-  if (placed.edges.length || placed.links.length) canvas.append(legendKey(placed));
+  if (edgeCount || linkCount) canvas.append(legendKey(placed));
   const plane = h("div.gridMap__plane", {}, canvas);
   replace(container, plane);
   fitMap(container, plane, placed);
@@ -599,9 +615,8 @@ const taskLine = (task, projectId) =>
     h("span.gridOverview__meta", { text: task.id }),
   );
 
-/** One working chat: where it goes, the last step it took, what that touched. */
+/** One working chat: where it goes and what it is linked to. */
 function chatLine(chat) {
-  const step = stepLabel(chat);
   const linked = linkedTasksLabelFor(chat);
   return h(
     "li.gridOverview__item",
@@ -611,9 +626,7 @@ function chatLine(chat) {
       "div.gridOverview__body",
       {},
       h("a.gridOverview__link", { href: chatHref(chat.chat_id), text: text(chat.title) || text(chat.chat_id) }),
-      step || linked
-        ? h("span.gridOverview__detail", { text: [step, linked].filter(Boolean).join(" · ") })
-        : null,
+      linked ? h("span.gridOverview__detail", { text: linked }) : null,
     ),
     h("span.gridOverview__meta", { text: chat.awaiting_approval ? "Awaiting approval" : "Active" }),
   );
@@ -680,11 +693,15 @@ function connectionsSection(map, projectId) {
  * working right now, the files, the sub-projects - and, where a section
  * could not be read, the reason instead of an empty pretence.
  */
-export function renderOverview(container, map, { projectId = "" } = {}) {
+export function renderOverview(container, map, { projectId = "", inspector = null } = {}) {
   const tasks = Array.isArray(map?.tasks?.items) ? map.tasks.items : [];
-  const processes = Array.isArray(map?.processes?.items) ? map.processes.items : [];
+  const processes = mapChats(map);
   const files = Array.isArray(map?.files?.items) ? map.files.items : [];
   const parts = [h("h2.gridOverview__title", { text: "Overview" })];
+  // The inspector stands at the top of the panel, where the reader is already
+  // looking; it is built by js/grid/inspector.js and is absent until a card is
+  // selected.
+  if (inspector) parts.push(inspector);
 
   if (text(map?.project?.description)) {
     parts.push(h("p.gridOverview__description", { text: text(map.project.description) }));
@@ -713,8 +730,9 @@ export function renderOverview(container, map, { projectId = "" } = {}) {
   }
 
   // Processes: the chats of the project, the working ones named.
-  if (map?.processes?.available === false) {
-    parts.push(overviewSection("Processes", unavailableNote(map.processes)));
+  const chats = chatsSection(map);
+  if (chats?.available === false) {
+    parts.push(overviewSection("Processes", unavailableNote(chats)));
   } else {
     const working = processes.filter((chat) => chat.active || chat.awaiting_approval);
     parts.push(
@@ -723,7 +741,7 @@ export function renderOverview(container, map, { projectId = "" } = {}) {
         working.length
           ? h("ul.gridOverview__list", {}, ...working.slice(0, 8).map(chatLine))
           : h("p.gridOverview__note", { text: "No chat is working right now." }),
-        truncatedNote(map.processes),
+        truncatedNote(chats),
       ),
     );
   }

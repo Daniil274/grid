@@ -49,3 +49,40 @@ export async function fetchProjects() {
   const payload = await api.projects();
   return Array.isArray(payload?.projects) ? payload.projects : [];
 }
+
+/**
+ * GET /api/projects/{project}/map/chats/{chat}.
+ *
+ * The one detail read of this page: bounded, payload-free messages, runs and
+ * operations of a single chat. It is asked for only when that chat is selected,
+ * and its ETag is kept so a repeated read of an unchanged chat costs a 304.
+ *
+ * @param {string} projectId
+ * @param {string} chatId
+ * @param {{etag?: string, signal?: AbortSignal}} [options]
+ * @returns {Promise<{notModified: boolean, etag: string, detail?: object}>}
+ */
+export async function fetchChatDetail(projectId, chatId, { etag = "", signal } = {}) {
+  const url =
+    `/api/projects/${encodeURIComponent(String(projectId))}/map/chats/${encodeURIComponent(String(chatId))}`;
+  const response = await fetch(url, {
+    cache: "no-cache",
+    headers: etag ? { "If-None-Match": etag } : {},
+    signal,
+  });
+  if (response.status === 401) {
+    location.assign(SIGN_IN);
+    throw new Error("Signed out");
+  }
+  if (response.status === 304) return { notModified: true, etag };
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error(
+      payload?.detail || payload?.reason || `GET ${url} failed (${response.status})`,
+    );
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
+  return { notModified: false, etag: response.headers?.get?.("ETag") ?? "", detail: payload };
+}
