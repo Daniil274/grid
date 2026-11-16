@@ -631,6 +631,9 @@ def register_voice_routes(
         return service
     service = VoiceService(deployment)
     app.state.grid_voice_service = service
+    # A single lifecycle-owned local STT service for HTTP, chat and Telegram.
+    # Headless Telegram sessions have no request/app from which to retrieve it.
+    deployment.voice_service = service
     dependencies = list(dependencies)
 
     def _error_response(exc: Exception, fallback_detail: str) -> HTTPException:

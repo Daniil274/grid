@@ -1,11 +1,14 @@
 """Files a user hands to the agents, and files the agents hand back.
 
-Images still travel inside the message, for the model to see
-(web_chat.attachments). Every other file is uploaded into the user's workspace,
-under ``uploads/``, where the agents' file tools and commands reach it; the
-chat then mentions it in the message as a link, so the agent knows its path and
-the user can download it again. Any file of the workspace can be downloaded the
-same way - a document an agent wrote, for instance.
+Images travel inside the message, for the model to see (web_chat.attachments),
+and are also written into ``uploads/`` of the chat's workspace when their turn
+starts; the message names each one by a link, so the agent knows its path and
+the picture outlives a model that cannot see it. Every other file is uploaded
+into the user's workspace, under ``uploads/``, where the agents' file tools and
+commands reach it; the chat then mentions it in the message as a link, so the
+agent knows its path and the user can download it again. Any file of the
+workspace can be downloaded the same way - a document an agent wrote, for
+instance.
 
     POST /api/workspace/uploads         multipart ``files`` -> [{path, name, bytes, type, url}]
                                         (``?dir=<folder>``: into that existing folder
@@ -153,6 +156,17 @@ def _plain(info: os.stat_result, is_kind: Callable[[int], bool]) -> bool:
 def _owner(workspace: Path) -> tuple[int, int]:
     info = os.stat(workspace)
     return info.st_uid, info.st_gid
+
+
+def keep_ownership(workspace: Path, fd: int) -> None:
+    """Give the new file *fd* the owner of *workspace* when the server is root.
+
+    The files of a workspace belong to its user: a root server (a container,
+    say) must not leave the user's own uploads owned by root.
+    """
+    if _server_is_root():
+        uid, gid = _owner(workspace)
+        os.fchown(fd, uid, gid)
 
 
 def _uploads_fd(workspace: Path) -> int:
@@ -317,9 +331,7 @@ async def save_upload(
                         f"Your uploads are full: delete some files of {uploads.prefix or 'the folder'}/ first."
                     )
                 handle.write(chunk)
-            if _server_is_root():
-                uid, gid = _owner(workspace)
-                os.fchown(handle.fileno(), uid, gid)
+            keep_ownership(workspace, handle.fileno())
     except BaseException:
         try:
             uploads.unlink(name)

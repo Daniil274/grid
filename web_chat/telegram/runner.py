@@ -57,6 +57,7 @@ class TurnRunner:
         self._agent = agent
 
     async def run(self, user_id: str, context_id: str, message: str, *,
+                  audio: Any = None,
                   on_watch: Callable[[Any, str], Awaitable[None]] | None = None,
                   on_context: Callable[[str], None] | None = None) -> TurnOutcome:
         """Start the turn in *context_id* and wait for its end."""
@@ -73,7 +74,7 @@ class TurnRunner:
                                        context_id=context_id)
                 socket = HeadlessSocket()
                 session = ChatSession(space, socket, context_id)
-                if not await session._start(message, self._system, self._agent):
+                if not await session._start(message, self._system, self._agent, audio=audio):
                     return TurnOutcome("refused", reason=socket.refusal() or "The turn did not start.",
                                        context_id=context_id)
                 active = space.turns.running(context_id)

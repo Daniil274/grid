@@ -20,6 +20,8 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from web_chat.errors import error_text
+
 from .bot import Bot, BotError
 from .config import TOKEN_ENV, ConfigError, Settings, looks_like_token
 from .secrets import TelegramSecrets
@@ -84,7 +86,7 @@ class TelegramManager:
             except ConfigError as exc:
                 # As before: a server told to run the channel without a token
                 # does not start half-configured.
-                self._error = str(exc)
+                self._error = error_text(exc)
                 raise
             self._settings = settings
             self._error = ""

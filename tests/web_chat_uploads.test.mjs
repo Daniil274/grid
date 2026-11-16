@@ -116,6 +116,24 @@ test("the files block reads back as the files it was written from", () => {
   assert.deepEqual(splitFiles("just words"), { text: "just words", files: [] });
 });
 
+// What the server appends to a message whose images it kept
+// (web_chat/attachments.py with_attachments): one line per image, in the same
+// block, with the chat that opens it and the path the agent's tools take.
+const keptImage = { name: "image-20260101-120000-abcdef12-1.png",
+  path: "uploads/image-20260101-120000-abcdef12-1.png",
+  url: "/api/workspace/files/uploads/image-20260101-120000-abcdef12-1.png?context=chat-1" };
+const keptLine = (file) => "- [" + file.name + "](" + file.url + ") — workspace path: " + JSON.stringify(file.path);
+const NL = String.fromCharCode(10);
+
+test("the images a chat kept read back as files of that chat", () => {
+  const content = ["what is this?", "", "Attached files:", keptLine(keptImage)].join(NL);
+  assert.deepEqual(splitFiles(content), { text: "what is this?", files: [keptImage] });
+  assert.ok(!renderMarkdown(splitFiles(content).text).includes("Attached files"));
+  // Documents and images live in one block; the page reads both back.
+  const both = withFiles("look", [report]) + NL + keptLine(keptImage);
+  assert.deepEqual(splitFiles(both).files, [report, keptImage]);
+});
+
 test("only a block of workspace downloads is taken for files", () => {
   const typed = 'Look:' + String.fromCharCode(10, 10) + 'Attached files:' + String.fromCharCode(10)
     + '- [x](https://example.com/x) — workspace path: "x"';

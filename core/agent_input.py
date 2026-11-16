@@ -31,7 +31,7 @@ class AgentInput:
 def _has_image(message: Any) -> bool:
     content = message.get("content") if isinstance(message, dict) else None
     return isinstance(content, list) and any(
-        isinstance(part, dict) and part.get("type") in IMAGE_PART_TYPES
+        isinstance(part, dict) and part.get("type") in (*IMAGE_PART_TYPES, "input_file", "input_audio")
         for part in content
     )
 

@@ -32,6 +32,7 @@ from .bot import Bot, BotError, chunks
 from .config import Settings
 from .confirm import Approvals, parse_callback
 from .reminders import ReminderError, Reminders, describe
+from web_chat.errors import error_text
 from .runner import TurnRunner
 from .store import TelegramStore
 
@@ -239,7 +240,7 @@ class TelegramChannel:
             return
         voice = message.get("voice") or message.get("audio") or {}
         if isinstance(voice, dict) and voice.get("file_id"):
-            await self._voice_note(user_id, chat_id, thread_id, voice)
+            await self._voice_note(user_id, chat_id, thread_id, voice, caption=text)
             return
         if message.get("video_note"):
             await self._say(chat_id, thread_id, "Video notes are not supported; send text or a voice note.")
@@ -299,7 +300,7 @@ class TelegramChannel:
             try:
                 reminder = self.reminders.add(user_id, chat_id, thread_id, argument, now=self._clock())
             except ReminderError as exc:
-                await self._say(chat_id, thread_id, str(exc))
+                await self._say(chat_id, thread_id, error_text(exc))
                 return
             except Exception:  # noqa: BLE001 - a bad reminder is a message, not a crash
                 logger.warning("A Telegram reminder could not be stored")
@@ -330,7 +331,7 @@ class TelegramChannel:
             await self._say(chat_id, thread_id, "Unknown command.\n\n" + HELP)
 
     # -- a turn --------------------------------------------------------------
-    async def _turn(self, user_id: str, chat_id: int, thread_id: int, text: str) -> None:
+    async def _turn(self, user_id: str, chat_id: int, thread_id: int, text: str, *, audio: Any = None) -> None:
         context_id = self.store.context(chat_id, thread_id) or uuid.uuid4().hex
         self.store.set_context(chat_id, thread_id, user_id, context_id, now=self._clock())
 
@@ -338,7 +339,8 @@ class TelegramChannel:
             await self.approvals.publish(space, user_id, chat_id, thread_id, active_context)
 
         try:
-            outcome = await self.runner.run(user_id, context_id, text, on_watch=watch)
+            kwargs = {"audio": audio} if audio is not None else {}
+            outcome = await self.runner.run(user_id, context_id, text, on_watch=watch, **kwargs)
         except Exception:  # noqa: BLE001 - the user gets a refusal, not silence
             logger.warning("A Telegram turn failed to run")
             await self._say(chat_id, thread_id, "The turn could not be started. Try again.")
@@ -380,32 +382,21 @@ class TelegramChannel:
             logger.info("A Telegram voice reply was not sent; sending text")
             return False
 
-    async def _voice_note(self, user_id: str, chat_id: int, thread_id: int, voice: dict[str, Any]) -> None:
-        service = self._voice_service()
-        if service is None:
-            await self._say(chat_id, thread_id, "Voice notes are not available on this server; send text.")
-            return
-        if not audio.available():
-            await self._say(chat_id, thread_id, "Voice notes need ffmpeg on the server; send text.")
-            return
+    async def _voice_note(self, user_id: str, chat_id: int, thread_id: int, voice: dict[str, Any], *, caption: str = "") -> None:
         try:
-            ogg = await self.bot.download(str(voice["file_id"]))
-            wav = await audio.to_wav(ogg)
-            result = await service.transcribe(wav)
-        except audio.AudioUnavailable:
-            await self._say(chat_id, thread_id, "That voice note could not be converted; send text.")
-            return
+            from core.media import MAX_AUDIO_BYTES, sniff
+            from web_chat.audio_ingress import AudioAttachment
+            if int(voice.get("file_size") or 0) > MAX_AUDIO_BYTES:
+                raise ValueError("Audio message exceeds 20 MiB")
+            data = await self.bot.download(str(voice["file_id"]))
+            attachment = AudioAttachment(data, sniff(data[:64]) or "")
         except BotError:
             await self._say(chat_id, thread_id, "That voice note could not be downloaded.")
             return
-        except Exception:  # noqa: BLE001 - recognition failures are messages too
-            await self._say(chat_id, thread_id, "Speech recognition is unavailable right now; send text.")
+        except ValueError as exc:
+            await self._say(chat_id, thread_id, error_text(exc))
             return
-        text = str((result or {}).get("text") or "").strip()
-        if not text:
-            await self._say(chat_id, thread_id, "I could not hear words in that voice note.")
-            return
-        await self._turn(user_id, chat_id, thread_id, text)
+        await self._turn(user_id, chat_id, thread_id, caption, audio=attachment)
 
     # -- buttons -------------------------------------------------------------
     async def _callback(self, query: dict[str, Any]) -> None:

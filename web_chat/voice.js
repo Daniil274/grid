@@ -456,11 +456,12 @@
       document.querySelector(".composerWrap").prepend(panel);
       const get = id => document.getElementById(`voice-${id}`);
       const open = document.createElement("button");
-      open.id = "voice-open-btn"; open.type = "button"; open.className = "iconBtn composer__mic";
+      open.id = "voice-open-btn"; open.type = "button"; open.className = "composerTools__action composer__mic";
       open.title = "Голосовой режим"; open.setAttribute("aria-label", "Голосовой режим");
       open.setAttribute("aria-pressed", "false"); open.setAttribute("aria-expanded", "false");
       open.innerHTML = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3"/></svg>`;
-      document.querySelector(".composer__buttons")?.prepend(open);
+      open.innerHTML += "<span>Голосовой разговор</span>";
+      (document.querySelector("#composer-tools-panel") || document.querySelector(".composer__buttons"))?.prepend(open);
       els = {panel, open, mic: get("mic-btn"), collapse: get("collapse-btn"), status: get("status"), details: get("details"),
         time: get("rec-time"), level: get("level-bar"), transcript: get("transcript")};
       els.mic.addEventListener("click", () => {
