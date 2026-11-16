@@ -48,7 +48,7 @@ function windowCard(window, now) {
 function limitsGrid(limits) {
   const rows = [
     ["Limit", money(limits.limit_usd)],
-    ["Remaining", money(limits.remaining_usd)],
+    ["Remaining", limits.remaining_usd == null ? "Not reported" : money(limits.remaining_usd)],
     ["Used", money(limits.usage_usd)],
     ["Today", money(limits.usage_daily_usd)],
     ["This week", money(limits.usage_weekly_usd)],
@@ -56,6 +56,20 @@ function limitsGrid(limits) {
   ];
   if (limits.limit_reset) rows.push(["Resets", String(limits.limit_reset)]);
   return h("dl.usageQuotaLimits", {}, ...rows.flatMap(([term, value]) => [h("dt", { text: term }), h("dd", { text: value })]));
+}
+
+function meteredGrid(metered) {
+  const rows = [];
+  for (const [period, label] of [["day", "Today"], ["week", "Last 7 days"], ["month", "This month"]]) {
+    const bucket = metered?.[period];
+    if (!bucket) continue;
+    const counts = `${Number(bucket.total_tokens ?? 0).toLocaleString()} tokens · ${Number(bucket.responses ?? 0).toLocaleString()} responses`;
+    rows.push([label, bucket.cost_usd == null ? counts : `${counts} · ${money(bucket.cost_usd)}`]);
+  }
+  return rows.length ? h("div", {},
+    h("h4", { text: "Recorded usage" }),
+    h("dl.usageQuotaLimits", {}, ...rows.flatMap(([term, value]) => [h("dt", { text: term }), h("dd", { text: value })])),
+  ) : null;
 }
 
 /** The plan's own policy (web_chat.credentials_api's /api/plan), next to provider quotas. */
@@ -101,6 +115,7 @@ function sourceCard(source, now, onRefresh, busy) {
       h("div.usageQuotaHeadSide", {}, h("span.usageQuotaStatus", { dataset: { tone }, text: label }), action)),
     source.windows.length ? h("div.usageQuotaWindows", {}, ...source.windows.map((window) => windowCard(window, now))) : null,
     source.limits ? limitsGrid(source.limits) : null,
+    source.metered ? meteredGrid(source.metered) : null,
     source.note ? h("p.usageQuotaNote", { text: source.note }) : null,
     source.hint ? h("p.usageQuotaNote", { text: `Key ${source.hint}` }) : null,
     source.error ? h("p.usageQuotaNote", { dataset: { tone: "danger" }, text: source.error }) : null,

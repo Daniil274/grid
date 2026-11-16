@@ -107,6 +107,56 @@ class UsageStore:
             ).fetchone()
         return int(row[0]), (float(row[1]) if row[1] is not None else None)
 
+    def provider_summary(
+        self,
+        *,
+        provider: str,
+        user_id: str | None = None,
+        now: float | None = None,
+        charged_only: bool = False,
+    ) -> dict:
+        """Metered usage of *provider* across 5h, today, 7d, month and all time."""
+        from web_chat.limits import utc_day_start, utc_month_start
+
+        current = time.time() if now is None else float(now)
+        periods = {
+            "five_hour": current - 5 * 3600.0,
+            "day": utc_day_start(current),
+            "week": current - 7 * 86400.0,
+            "month": utc_month_start(current),
+            "total": 0.0,
+        }
+        where = ["provider = ?", "source != 'legacy'"]
+        base_params: list[object] = [provider]
+        if user_id is not None:
+            where.append("user_id = ?")
+            base_params.append(user_id)
+        if charged_only:
+            where.append("charged = 1")
+        clause = " AND ".join(where)
+        sums = ", ".join(
+            [f"COALESCE(SUM({field}), 0) AS {field}" for field in FIELDS]
+            + [f"COALESCE(SUM({expression}), 0) AS {name}" for name, expression in COST_FIELDS.items()]
+            + ["MAX(occurred_at) AS last_at", "MIN(occurred_at) AS first_at"]
+        )
+        result: dict[str, object] = {"provider": provider}
+        with self._lock:
+            for label, since in periods.items():
+                row = dict(
+                    self._db.execute(
+                        f"SELECT {sums} FROM usage_events WHERE {clause} AND occurred_at >= ?",
+                        [*base_params, since],
+                    ).fetchone()
+                )
+                entry = counters(row)
+                entry["first_at"] = float(row["first_at"]) if row["first_at"] is not None else None
+                entry["last_at"] = float(row["last_at"]) if row["last_at"] is not None else None
+                result[label] = entry
+        total = result["total"]
+        assert isinstance(total, dict)
+        result["last_at"] = total.get("last_at")
+        return result
+
     def import_legacy(self, rows: Iterable[dict]) -> None:
         """One atomic baseline at installation; restarts never import it twice."""
         with self._lock:

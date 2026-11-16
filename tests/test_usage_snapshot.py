@@ -404,7 +404,7 @@ def test_the_snapshot_api_requires_a_user_and_refreshes_only_known_sources(accou
     stub = StubSnapshot()
     server = WebChatServer(
         Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None, snapshot=stub,
-    )
+        trusted_hosts=("testserver",))
     anonymous = TestClient(server.app, headers=SAME_SITE)
     assert anonymous.get("/api/usage/snapshot").status_code == 401
     accounts.create_user("bob", PASSWORD)
@@ -424,8 +424,7 @@ def test_the_snapshot_api_requires_a_user_and_refreshes_only_known_sources(accou
 def test_the_snapshot_api_serves_every_source_without_a_secret(accounts):
     server = WebChatServer(
         Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None,
-        snapshot=snapshot_of(Vault(stored=("openrouter",))),
-    )
+        snapshot=snapshot_of(Vault(stored=("openrouter",))), trusted_hosts=("testserver",))
     accounts.create_user("bob", PASSWORD)
     body = signed_in(server, "bob").get("/api/usage/snapshot").json()
     sources = by_id(body)
@@ -704,3 +703,113 @@ def test_the_shipped_catalog_hands_the_usage_page_its_systems_models():
         local_cli_login=lambda: True,
     )
     assert "server:opencode" in by_id(snapshot.snapshot(admin()))
+
+
+@pytest.mark.asyncio
+async def test_configured_provider_usage_reports_metered_totals_windows_and_server_openrouter():
+    from web_chat.usage import UsageStore
+
+    usage = UsageStore()
+    usage.record(
+        event_id="e1",
+        user_id="u1",
+        model="k3.1-pro",
+        provider="kimi-code",
+        tokens_in=40_000,
+        tokens_out=10_000,
+        occurred_at=NOW - 300,
+        cost_micro=250_000,
+        cost_basis="computed",
+        credential_source="env",
+        charged=True,
+    )
+    usage.record(
+        event_id="e2",
+        user_id="u1",
+        model="deepseek-v4.1-flash",
+        provider="opencode",
+        tokens_in=150_000,
+        tokens_out=50_000,
+        occurred_at=NOW - 600,
+        cost_micro=100_000,
+        cost_basis="computed",
+        credential_source="env",
+        charged=True,
+    )
+
+    config = GridConfig(
+        providers={
+            "kimi-code": {
+                "name": "Kimi Code",
+                "base_url": "https://api.kimi.ai/coding/v1",
+                "api_key_env": "KIMI_CODE_API_KEY",
+                "usage": {
+                    "mode": "metered",
+                    "windows": {"five_hour": 100_000},
+                    "limits": {"day_usd": 5.0},
+                },
+            },
+            "opencode": {
+                "name": "OpenCode Go",
+                "base_url": "https://opencode.ai/zen/go/v1",
+                "api_key_env": "OPENCODE_API_KEY",
+                "usage": {"mode": "metered"},
+            },
+            "openrouter": {
+                "name": "OpenRouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key_env": "OPENROUTER_API_KEY",
+                "usage": {"mode": "openrouter_key"},
+            },
+        },
+        models={
+            "kimi-k3.1-pro": {"name": "k3.1-pro", "provider": "kimi-code"},
+            "deepseek-flash-latest": {"name": "deepseek-v4.1-flash", "provider": "opencode"},
+            "router": {"name": "typesafe/jev-1.13", "provider": "openrouter"},
+        },
+    )
+
+    snapshot = UsageSnapshot(
+        lambda: Plans(lambda: config),
+        lambda: config,
+        vault=Vault(),
+        usage=usage,
+        environ={
+            "KIMI_CODE_API_KEY": "sk-kimi-server",
+            "OPENCODE_API_KEY": "sk-opencode-server",
+            "OPENROUTER_API_KEY": "sk-or-server",
+        },
+        key_transport=httpx.MockTransport(lambda r: httpx.Response(200, json=OPENROUTER)),
+        clock=lambda: NOW,
+    )
+
+    state = await snapshot.snapshot_live(admin())
+    sources = by_id(state)
+
+    kimi_srv = sources["server:kimi-code"]
+    assert kimi_srv["connected"] is True
+    assert kimi_srv["status"] == "estimate"
+    assert kimi_srv["windows"][0]["used"] == 50.0
+    assert kimi_srv["limits"]["usage_daily_usd"] == pytest.approx(0.25)
+    assert kimi_srv["limits"]["day_limit_usd"] == 5.0
+    assert kimi_srv["metered"]["day"]["total_tokens"] == 50_000
+    assert kimi_srv["metered"]["day"]["responses"] == 1
+
+    opencode_srv = sources["server:opencode"]
+    assert opencode_srv["connected"] is True
+    assert opencode_srv["status"] == "live"
+    assert opencode_srv["metered"]["day"]["total_tokens"] == 200_000
+
+    or_srv = sources["server:openrouter"]
+    assert or_srv["connected"] is True
+    assert or_srv["status"] == "live"
+    assert or_srv["limits"]["remaining_usd"] == 7.5
+    assert "sk-" not in json.dumps(state)
+
+    # Non-admin users never get the operator's OpenRouter balance or refresh action.
+    user_sources = by_id(snapshot.snapshot(user()))
+    assert user_sources["server:openrouter"]["action"] is None
+    assert user_sources["server:openrouter"]["limits"] is None
+    with pytest.raises(SnapshotError, match="No source"):
+        await snapshot.refresh(user(), "server:openrouter")
+    usage.close()

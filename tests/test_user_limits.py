@@ -188,7 +188,7 @@ def test_a_version_1_database_gains_the_usage_table(tmp_path):
 async def test_a_refused_turn_says_why_and_does_not_run():
     run, started, release, seen = running_agent()
     space, socket = space_for(run), Socket()
-    space.admit_turn = lambda: "You have used today's 5 turns."
+    space.admit_turn = lambda turn=None: "You have used today's 5 turns."
     session = asyncio.create_task(chat_session(space, socket, "ctx"))
 
     await socket.incoming.put('{"message":"hello"}')
@@ -209,7 +209,7 @@ async def test_a_queued_message_that_is_refused_stays_in_the_queue():
     await asyncio.wait_for(started.wait(), 2)
     await socket.incoming.put('{"message":"later","delivery":"after_turn"}')
     await socket.event("queue")
-    space.admit_turn = lambda: "Limit reached."
+    space.admit_turn = lambda turn=None: "Limit reached."
 
     release.set()  # the turn answers; the queue would move on
 
@@ -218,7 +218,7 @@ async def test_a_queued_message_that_is_refused_stays_in_the_queue():
     assert [item["text"] for item in items] == ["later"]
     assert seen == ["first"]
 
-    space.admit_turn = lambda: None
+    space.admit_turn = lambda turn=None: None
     await socket.incoming.put(json.dumps({"action": "send_queued", "id": items[0]["id"]}))
     await wait_for(lambda: seen == ["first", "later"])
     await socket.incoming.put(None)
@@ -239,7 +239,15 @@ def test_a_space_applies_the_deployments_limits(tmp_path, monkeypatch):
     )
 
     assert space.admit_turn() is None
-    space.turns.claim("ctx")
+    turn = object()
+    space.turns.claim("ctx", turn)  # a turn's claim has its turn as the owner
     assert "running" in space.admit_turn()
-    assert counter.counted == 1
+    # The turn asking for admission is not counted against itself.
+    assert "running" in space.admit_turn(object())
+    assert space.admit_turn(turn) is None
+    # A claim held by an operation (a compaction, a fork) is not a running turn.
+    space.turns.release("ctx", turn)
+    space.turns.claim("other")
+    assert space.admit_turn() is None
+    assert counter.counted == 3  # each admitted turn counts; refusals do not
     assert UserSpace(Deployment(config_path=str(config))).admit_turn() is None  # one user: no limits

@@ -134,6 +134,30 @@ test("a source with nothing to read has no button, and no sources says so", () =
   assert.match(empty.textContent, /No subscription or key is configured/);
 });
 
+test("recorded tokens and responses remain visible when provider quota is unavailable", () => {
+  const container = render({ now: NOW, sources: [{
+    ...unavailable,
+    metered: {
+      day: { total_tokens: 12345, responses: 7, cost_usd: 0.25 },
+      week: { total_tokens: 23456, responses: 18, cost_usd: 0.75 },
+      month: { total_tokens: 34567, responses: 24, cost_usd: 1.25 },
+    },
+  }] });
+  const card = container.find("usageQuotaCard");
+  assert.match(card.textContent, /Recorded usage/);
+  assert.match(card.textContent, /12,345 tokens · 7 responses · \$0\.2500/);
+  assert.match(card.textContent, /Last 7 days/);
+  assert.match(card.textContent, /34,567 tokens · 24 responses · \$1\.25/);
+  assert.equal(card.findAll("usageQuotaFill").length, 0);
+});
+
+test("an unknown remaining balance is not presented as unlimited", () => {
+  const container = render({ now: NOW, sources: [{
+    ...keyed, limits: { ...keyed.limits, remaining_usd: null },
+  }] });
+  assert.match(container.find("usageQuotaCard").textContent, /RemainingNot reported/);
+});
+
 test("the plan's own policy and spend are shown next to provider quotas", () => {
   const plan = {
     tier: "byok",

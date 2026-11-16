@@ -1548,11 +1548,15 @@ class UserSpace:
                 "Background task %s failed", task.get_name(), exc_info=task.exception()
             )
 
-    def admit_turn(self) -> Optional[str]:
-        """None when the user may start a turn now (it is counted), or why not."""
+    def admit_turn(self, turn: Any = None) -> Optional[str]:
+        """None when the user may start a turn now (it is counted), or why not.
+
+        *turn* is the turn asking for admission; its own claim is not counted
+        against it (web_chat.turns.TurnBoard.running_turns_count).
+        """
         if self.limits is None:
             return None
-        return self.limits.admit(self.turns.claimed_count)
+        return self.limits.admit(self.turns.running_turns_count(turn))
 
     def record_usage(self, tokens_in: int, tokens_out: int) -> None:
         """Add a finished turn's tokens to the user's day (web_chat.limits)."""
