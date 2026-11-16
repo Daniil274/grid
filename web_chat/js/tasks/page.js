@@ -16,6 +16,7 @@
 
 import { h, icon, replace } from "../lib/dom.js";
 import { api } from "../net/api.js";
+import { TrackerMutations } from "./mutations.js";
 import { toast } from "../ui/toast.js";
 import { createTrackerTheme } from "./theme.js";
 import { ICONS } from "../ui/icons.js";
@@ -249,6 +250,10 @@ export class TasksPage {
   /** @param {object} nodes status, presets, activeFilters, undo, metrics, board, listWrap, listRows, search, type, priority, statusFilter, project, viewBoard, viewList, newTask, refresh */
   constructor(nodes) {
     this.nodes = nodes;
+    // Every write goes through one keyed action (./mutations.js): a repeated
+    // action answers the first write instead of making a second one, and a
+    // reload keeps an unconfirmed action without replaying it.
+    this.mutations = new TrackerMutations();
     this.tasks = [];
     this.available = null;
     this.reason = "";
@@ -767,21 +772,21 @@ export class TasksPage {
       }
       const previous = task.assignee ?? "";
       patch = { assignee: me };
-      perform = () => api.updateTask(task.id, { assignee: me });
-      undo = () => api.updateTask(task.id, { assignee: previous });
+      perform = () => this.mutations.updateTask(task.id, { assignee: me });
+      undo = () => this.mutations.updateTask(task.id, { assignee: previous });
       undoMessage = `Took “${task.title}” (assignee: ${me})`;
       done = `Took “${task.title}”`;
     } else if (action === "close") {
       patch = { status: "closed", state: "closed", close_reason: "Completed" };
-      perform = () => api.closeTask(task.id, "Completed");
-      undo = () => api.updateTask(task.id, { status: "open" });
+      perform = () => this.mutations.closeTask(task.id, "Completed");
+      undo = () => this.mutations.updateTask(task.id, { status: "open" });
       undoMessage = `Closed “${task.title}”`;
       done = "Task closed";
     } else if (action === "reopen") {
       const reason = task.close_reason || "Completed";
       patch = { status: "open", state: "ready", close_reason: null };
-      perform = () => api.updateTask(task.id, { status: "open" });
-      undo = () => api.closeTask(task.id, reason);
+      perform = () => this.mutations.updateTask(task.id, { status: "open" });
+      undo = () => this.mutations.closeTask(task.id, reason);
       undoMessage = `Reopened “${task.title}”`;
       done = "Task reopened";
     } else {
@@ -789,13 +794,22 @@ export class TasksPage {
     }
     // Show the change now; the request follows, and an error takes it back.
     const rollback = this._patchTask(task, patch);
+    this.offerUndo(undoMessage, undo);
     try {
       await perform();
-      this.offerUndo(undoMessage, undo);
       toast(done, { tone: "success" });
       await this.load();
     } catch (error) {
-      rollback();
+      // An unconfirmed write may have landed: show the tracker, not a guess,
+      // and leave its undo offered. A refusal takes both back.
+      if (error.unknown) await this.load();
+      else {
+        rollback();
+        if (this._undo?.run === undo) {
+          this._undo = null;
+          this._renderUndo();
+        }
+      }
       toast(error.message, { tone: "error" });
     }
   }
@@ -899,7 +913,7 @@ export class TasksPage {
     this.render();
     try {
       // In a project's view the task goes to that project's tracker.
-      const created = await api.createTask({ title: clean, ...(this.project ? { project_id: this.project } : {}) });
+      const created = await this.mutations.createTask({ title: clean, ...(this.project ? { project_id: this.project } : {}) });
       toast(`Created “${clean}”`, { tone: "success" });
       if (created?.id) this.selectedId = created.id;
       await this.load();
@@ -1325,9 +1339,9 @@ export class TasksPage {
       busy = true;
       closeTask.disabled = true;
       try {
-        await api.closeTask(closing.id, reasonInput.value.trim() || "Completed");
+        await page.mutations.closeTask(closing.id, reasonInput.value.trim() || "Completed");
         toast("Task closed", { tone: "success" });
-        page.offerUndo(`Closed “${closing.title}”`, () => api.updateTask(closing.id, { status: "open" }));
+        page.offerUndo(`Closed “${closing.title}”`, () => page.mutations.updateTask(closing.id, { status: "open" }));
         busy = false;
         await page.load();
         dismiss();
@@ -1346,9 +1360,9 @@ export class TasksPage {
       busy = true;
       reopen.disabled = true;
       try {
-        await api.updateTask(reopened.id, { status: "open" });
+        await page.mutations.updateTask(reopened.id, { status: "open" });
         toast("Task reopened", { tone: "success" });
-        page.offerUndo(`Reopened “${reopened.title}”`, () => api.closeTask(reopened.id, reopened.close_reason || "Completed"));
+        page.offerUndo(`Reopened “${reopened.title}”`, () => page.mutations.closeTask(reopened.id, reopened.close_reason || "Completed"));
         busy = false;
         await page.load();
         dismiss();
@@ -1378,7 +1392,7 @@ export class TasksPage {
       };
       try {
         if (mode === "create") {
-          await api.createTask({ ...fields, depends_on: pendingDeps, ...(page.project ? { project_id: page.project } : {}) });
+          await page.mutations.createTask({ ...fields, depends_on: pendingDeps, ...(page.project ? { project_id: page.project } : {}) });
           toast("Task created", { tone: "success" });
         } else if (task) {
           const patch = {};
@@ -1387,12 +1401,12 @@ export class TasksPage {
           }
           // The tracker replaces notes only when the dialog brought new ones.
           if (fields.notes === (task.notes ?? "")) delete patch.notes;
-          if (Object.keys(patch).length) await api.updateTask(task.id, patch);
+          if (Object.keys(patch).length) await page.mutations.updateTask(task.id, patch);
           for (const id of [...(task.depends_on ?? [])]) {
-            if (!pendingDeps.includes(id)) { await api.taskDep(task.id, "remove", id); task.depends_on = task.depends_on.filter(dep => dep !== id); }
+            if (!pendingDeps.includes(id)) { await page.mutations.taskDep(task.id, "remove", id); task.depends_on = task.depends_on.filter(dep => dep !== id); }
           }
           for (const id of pendingDeps) {
-            if (!(task.depends_on ?? []).includes(id)) { await api.taskDep(task.id, "add", id); task.depends_on = [...(task.depends_on ?? []), id]; }
+            if (!(task.depends_on ?? []).includes(id)) { await page.mutations.taskDep(task.id, "add", id); task.depends_on = [...(task.depends_on ?? []), id]; }
           }
           Object.assign(task, fields);
         }

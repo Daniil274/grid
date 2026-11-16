@@ -66,6 +66,7 @@ class BackgroundAgentSupervisor:
         max_timeout_seconds: int = 900,
         result_max_chars: int = 20_000,
         worker_instructions: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
@@ -77,6 +78,10 @@ class BackgroundAgentSupervisor:
         self.default_timeout_seconds = default_timeout_seconds
         self.max_timeout_seconds = max_timeout_seconds
         self.result_max_chars = result_max_chars
+        # The user these workers act for. A launched worker inherits it so its
+        # tools (the tracker, a workspace) see the same owner; None leaves the
+        # run without a user, as a CLI launcher has none.
+        self.user_id = user_id
         self.worker_instructions = worker_instructions or (
             "You are an execution subagent launched by Codex through Grid. "
             "Complete the assigned task using only the provided tools. "
@@ -180,12 +185,19 @@ class BackgroundAgentSupervisor:
                     + ", ".join(missing)
                 )
 
+            run_kwargs: Dict[str, Any] = {
+                "context_id": f"ctx-{uuid.uuid4().hex[:12]}",
+                # Bounded by the run's own timeout_seconds (_execute), not agent_timeout.
+                "timeout": 0,
+            }
+            if self.user_id:
+                # The worker acts for the user the host launched it for: its
+                # tools must not fall back to another workspace's identity.
+                run_kwargs["user_id"] = self.user_id
             result = await self.factory.run_agent_object_simple(
                 worker,
                 run.task_text,
-                context_id=f"ctx-{uuid.uuid4().hex[:12]}",
-                # Bounded by the run's own timeout_seconds (_execute), not agent_timeout.
-                timeout=0,
+                **run_kwargs,
             )
             run.final_output = self._truncate(str(result or ""))
             run.status = AgentStatus.COMPLETED

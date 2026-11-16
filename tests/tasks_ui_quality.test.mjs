@@ -7,6 +7,13 @@ const { TasksPage, matchesFilters } = await import("../web_chat/js/tasks/page.js
 const { createTrackerTheme, TRACKER_THEMES } = await import("../web_chat/js/tasks/theme.js");
 const { api } = await import("../web_chat/js/net/api.js");
 const el = (tag = "div") => document.createElement(tag);
+/** The page keys every write; a test reads the payload and checks the key is real. */
+const unkeyed = (patch) => {
+  const { request_id: key, ...rest } = patch ?? {};
+  assert.match(key ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "the write carries its action key");
+  return rest;
+};
+const changes = (list) => list.map(({ id, patch }) => ({ id, patch: unkeyed(patch) }));
 const nodes = () => Object.fromEntries([
   "status", "metrics", "board", "listWrap", "listRows", "search", "type", "priority", "statusFilter", "project", "viewBoard", "viewList", "newTask", "refresh",
 ].map(key => [key, el()]));
@@ -135,7 +142,7 @@ test("closed task edits preserve status; reopening requires an explicit status c
     notes.value = "changed";
     await submit();
     // A note is added to what the task already held, never swapped for it.
-    assert.deepEqual(updates, [{ id: "done", patch: { notes: "original\n\nchanged" } }]);
+    assert.deepEqual(changes(updates), [{ id: "done", patch: { notes: "original\n\nchanged" } }]);
 
     page.dialog.openTask(closed, [closed]);
     edit();
@@ -146,7 +153,7 @@ test("closed task edits preserve status; reopening requires an explicit status c
     edit();
     status.value = "open";
     await submit();
-    assert.deepEqual(updates[1], { id: "done", patch: { status: "open" } });
+    assert.deepEqual(changes([updates[1]])[0], { id: "done", patch: { status: "open" } });
 
     page.dialog.openCreate([closed]);
     assert.equal(status.value, "open");

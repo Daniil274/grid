@@ -17,6 +17,12 @@ const { api } = await import("../web_chat/js/net/api.js");
 
 const el = (tag) => document.createElement(tag);
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+/** The page keys every write; a test reads the payload and checks the key is real. */
+const unkeyed = (body) => {
+  const { request_id: key, ...rest } = body ?? {};
+  assert.match(key ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "the write carries its action key");
+  return rest;
+};
 const key = (name, extra = {}) => ({ key: name, preventDefault() {}, target: el("div"), ...extra });
 
 function nodes() {
@@ -85,7 +91,7 @@ test("a query with no matching task offers a Create row that makes the task", as
   page._onKeyDown(key("Enter"));
   await tick();
   await tick();
-  assert.deepEqual(created, [{ title: "Gamma" }]);
+  assert.deepEqual(created.map(unkeyed), [{ title: "Gamma" }]);
   assert.equal(page.palette.isOpen(), false);
 });
 
@@ -174,7 +180,7 @@ test("a quick action shows at once, then reloads on success", async () => {
   await page.load();
   page._me = "alice";
   await page.quickAction("take", page.tasks[0]);
-  assert.deepEqual(calls[0], { id: "bd-1", patch: { assignee: "alice" } });
+  assert.deepEqual({ id: calls[0].id, patch: unkeyed(calls[0].patch) }, { id: "bd-1", patch: { assignee: "alice" } });
 });
 
 test("a refused PATCH rolls the optimistic change back", async () => {

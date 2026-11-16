@@ -259,6 +259,24 @@ async def test_a_session_is_seeded_only_from_its_own_conversation(factory):
     assert "Other." in str(runner.seen[2].items)
 
 
+async def test_the_recorded_prompt_is_the_agent_that_answered_last(factory):
+    """After a switch the inspector shows the running agent's prompt, not the first."""
+    from core.config.prompt_sections import PromptSection
+
+    factory.config.build_agent_prompt_sections = lambda agent_key: [
+        PromptSection(key="base_prompt", content=f"PROMPT OF {agent_key}", scope="static")
+    ]
+    with use(ScriptedRunner("First.", "Review.")):
+        await factory.run_agent("worker", "Go")
+        context_id = factory.context_manager.get_current_context_id()
+        await factory.run_agent("reviewer", "Review it", context_id=context_id)
+
+    metadata = factory.context_manager.get_context_metadata(context_id)
+    assert "PROMPT OF reviewer" in metadata["agent_instructions"]
+    assert "PROMPT OF worker" not in metadata["agent_instructions"]
+    assert metadata["last_context_assembly"]["metadata"]["agent_key"] == "reviewer"
+
+
 async def test_a_transient_provider_error_is_retried(factory):
     runner = ScriptedRunner(httpx.ConnectError("reset"), "Recovered.")
     with use(runner), patch("asyncio.sleep", new=AsyncMock()) as sleep:
@@ -693,7 +711,9 @@ async def test_every_model_call_clears_old_tool_outputs_past_the_budget(factory)
             {"type": "function_call_output", "call_id": f"c{n}", "output": "y" * 200_000},
         ]
     apply = runner.calls[0].run_config.call_model_input_filter
-    sent = apply(CallModelData(model_data=ModelInputData(input=items, instructions="Be brief."), agent=None, context=None)).input
+    sent = apply(
+        CallModelData(model_data=ModelInputData(input=items, instructions="Be brief."), agent=None, context=None)
+    ).input
     outputs = [item["output"] for item in sent if item["type"] == "function_call_output"]
     assert outputs[-1] == "y" * 200_000  # the newest is kept
     assert all(output.startswith("[Output of file_read cleared") for output in outputs[:-1])

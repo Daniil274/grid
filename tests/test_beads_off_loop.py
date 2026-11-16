@@ -3,6 +3,7 @@
 import asyncio
 import time
 
+from core import tracker_gateway
 from tools import beads_tools
 
 
@@ -29,18 +30,30 @@ async def test_a_slow_bd_command_leaves_the_event_loop_free(monkeypatch):
     assert ticks >= 10
 
 
-def test_bd_in_a_container_is_ended_there_too(monkeypatch):
+def test_bd_in_a_container_is_ended_there_too(monkeypatch, tmp_path):
     calls = []
 
-    def run(cmd, **kwargs):
-        calls.append((cmd, kwargs["timeout"]))
-        return type("Done", (), {"returncode": 0, "stdout": "[]", "stderr": ""})()
+    class Done:
+        returncode = 0
 
-    monkeypatch.setattr(beads_tools.subprocess, "run", run)
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            self.kwargs = kwargs
+
+        def communicate(self, timeout=None):
+            calls.append((self.cmd, timeout))
+            return "[]", ""
+
+    # The gateway starts bd with Popen (a timed-out command is stopped by its
+    # process group, which run() cannot do); the probe is off here so exactly
+    # one command is asked for.
+    monkeypatch.setenv("GRID_TRACKER_GATE_DIR", str(tmp_path / "gate"))
+    monkeypatch.setattr(beads_tools.subprocess, "Popen", Done)
+    monkeypatch.setattr(tracker_gateway, "probe_version", lambda backend: None)
     monkeypatch.setattr(beads_tools, "_find_bd", lambda container_id: "bd")
     monkeypatch.setattr(beads_tools, "_map_path_to_container", lambda cwd, context: "/workspace")
 
-    beads_tools._run_bd_command(["list"], container_id="c0ffee")
+    beads_tools._run_bd_command(["list"], cwd=str(tmp_path), container_id="c0ffee")
 
     [(cmd, timeout)] = calls
     assert cmd[:7] == ["docker", "exec", "-w", "/workspace", "-e", "BEADS_DAEMON=0", "c0ffee"]

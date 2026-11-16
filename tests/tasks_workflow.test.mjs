@@ -19,6 +19,17 @@ const { api } = await import("../web_chat/js/net/api.js");
 const el = (tag) => document.createElement(tag);
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
+/**
+ * The page keys every write with an action key; a test reads the payload the
+ * user asked for and insists that the key is a real one.
+ */
+const unkeyed = (patch) => {
+  const { request_id: key, ...rest } = patch ?? {};
+  assert.match(key ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "the write carries its action key");
+  return rest;
+};
+const changes = (list) => list.map(({ id, patch }) => ({ id, patch: unkeyed(patch) }));
+
 const buttonByText = (root, text) =>
   root.querySelectorAll("button").find((button) => button.textContent.trim() === text);
 
@@ -205,7 +216,7 @@ test("a card's quick actions take, close and reopen without opening the dialog",
   const closed = [];
   const updates = [];
   api.tasks = async () => report(TASKS());
-  api.closeTask = async (id, reason) => { closed.push({ id, reason }); return { ok: true }; };
+  api.closeTask = async (id, reason, options) => { closed.push({ id, reason, request_id: options?.request_id }); return { ok: true }; };
   api.updateTask = async (id, patch) => { updates.push({ id, patch }); return { ok: true }; };
 
   const page = new TasksPage(nodes());
@@ -217,15 +228,18 @@ test("a card's quick actions take, close and reopen without opening the dialog",
   // Take on myself.
   page._me = "alice";
   await byAction("take").listeners.click[0]();
-  assert.deepEqual(updates, [{ id: "bd-1", patch: { assignee: "alice" } }]);
+  assert.deepEqual(changes(updates), [{ id: "bd-1", patch: { assignee: "alice" } }]);
 
   // Close, then undo it through the bar.
   await byAction("close").listeners.click[0]();
-  assert.deepEqual(closed, [{ id: "bd-1", reason: "Completed" }]);
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0].id, "bd-1");
+  assert.equal(closed[0].reason, "Completed");
+  assert.match(closed[0].request_id ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "the close carries its action key");
   const undo = buttonByText(page.nodes.undo, "Undo");
   assert.ok(undo, "closing offers an undo");
   await undo.listeners.click[0]();
-  assert.deepEqual(updates.at(-1), { id: "bd-1", patch: { status: "open" } });
+  assert.deepEqual(changes([updates.at(-1)])[0], { id: "bd-1", patch: { status: "open" } });
 });
 
 test("a closed card offers Reopen, and Reopen is a real API write", async () => {
@@ -241,7 +255,7 @@ test("a closed card offers Reopen, and Reopen is a real API write", async () => 
   const reopen = card.querySelectorAll("button").find((node) => node.dataset.action === "reopen");
   assert.ok(reopen, "a closed card offers Reopen");
   await reopen.listeners.click[0]();
-  assert.deepEqual(updates, [{ id: "bd-2", patch: { status: "open" } }]);
+  assert.deepEqual(changes(updates), [{ id: "bd-2", patch: { status: "open" } }]);
 });
 
 test("the dialog shows an explicit Reopen for a closed task only", async () => {
@@ -257,7 +271,7 @@ test("the dialog shows an explicit Reopen for a closed task only", async () => {
   const reopen = buttonByText(page.dialog.el, "Reopen");
   assert.equal(reopen.hidden, false);
   await reopen.listeners.click[0]();
-  assert.deepEqual(updates, [{ id: "bd-1", patch: { status: "open" } }]);
+  assert.deepEqual(changes(updates), [{ id: "bd-1", patch: { status: "open" } }]);
 
   page.dialog.openTask(page.tasks[0], page.tasks);
   assert.equal(buttonByText(page.dialog.el, "Reopen").hidden, true, "an open task has nothing to reopen");

@@ -260,9 +260,9 @@ def test_beads_default_directory_uses_the_chats_shared_tracker(tmp_path):
     context = SimpleNamespace(context=SimpleNamespace(factory=factory))
 
     assert _resolve_directory(context, ".") == str(tracker)
-    # The former auto-run setting bypassed the shared tracker and initialized
-    # a fresh embedded Dolt database in every new chat's workspace.
-    assert _resolve_directory(context, "/") == str(workspace.resolve())
+    # An explicit container-root spelling must not bypass the pinned tracker
+    # and initialize a separate database in every new chat's workspace.
+    assert _resolve_directory(context, "/") == str(tracker.resolve())
 
 
 def test_the_health_check_asks_who_can_actually_serve_the_model(tmp_path):

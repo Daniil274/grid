@@ -171,6 +171,7 @@ def build_supervisor(
     max_concurrency: int = 4,
     default_timeout_seconds: int = 300,
     max_timeout_seconds: int = 900,
+    user_id: Optional[str] = None,
 ) -> BackgroundAgentSupervisor:
     """Build the catalog and runtime used by the Codex-facing MCP server."""
     resolved_config = str(Path(config_path).resolve())
@@ -192,6 +193,9 @@ def build_supervisor(
         max_concurrency=max_concurrency,
         default_timeout_seconds=default_timeout_seconds,
         max_timeout_seconds=max_timeout_seconds,
+        # The host's identity for the workers it launches; a model never sets
+        # it. None keeps the launcher's identity (a CLI launcher has none).
+        user_id=user_id,
     )
 
 

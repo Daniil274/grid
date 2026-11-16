@@ -12,6 +12,12 @@ const parent = { id: "parent", title: "Prerequisite", status: "open", state: "re
 const button = (dialog, text) => dialog.querySelectorAll("button").find(node => node.textContent === text);
 const field = (dialog, label) => ["input", "select", "textarea"].flatMap(tag => dialog.querySelectorAll(tag)).find(node => node.getAttribute("aria-label") === label);
 const submit = dialog => dialog.querySelector("form").listeners.submit[0]({ preventDefault() {} });
+/** The page keys every write; a test reads the payload and checks the key is real. */
+const unkeyed = (patch) => {
+  const { request_id: key, ...rest } = patch ?? {};
+  assert.match(key ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "the write carries its action key");
+  return rest;
+};
 
 test("read-first Markdown document has focus, full long text, close reason and readable dependency jumps", () => {
   const page = new TasksPage(nodes());
@@ -80,7 +86,7 @@ test("Save returns to reading; read/trace submits cannot mutate; escaped Markdow
   button(dialog, "Edit").click();
   field(dialog, "Notes").value = "after";
   await submit(dialog);
-  assert.deepEqual(patches, [{ notes: "before\n\nafter" }]);
+  assert.deepEqual(patches.map(unkeyed), [{ notes: "before\n\nafter" }]);
   assert.equal(dialog.querySelector("form").hidden, true);
   assert.match(dialog.findAll("taskDialog__prose")[1].innerHTML, /after/);
   page.dialog.openTask({ ...current, source: "trace" }, page.tasks);

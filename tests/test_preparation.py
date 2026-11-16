@@ -12,6 +12,7 @@ import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -578,3 +579,113 @@ async def test_a_containers_working_directory_is_the_mounted_workspace():
     )
 
     assert seen == ["/workspace"]
+
+
+# --------------------------------------------------------------------------
+# The typed result of required init_tools
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "result, status",
+    [
+        (RuntimeError("tracker is down"), FAILED),
+        (json.dumps({"success": False, "error": "no beads database found"}), FAILED),
+        ("❌ Error showing bead x-1: no issue found", FAILED),
+        (json.dumps({"status": "blocked", "rule": "run_stopped"}), BLOCKED),
+    ],
+)
+async def test_an_init_tool_that_did_not_succeed_is_not_a_successful_preparation(result, status):
+    """A raise, a missing tool or a failed answer all make the batch fail."""
+    invoke = AsyncMock(side_effect=result) if isinstance(result, Exception) else AsyncMock(return_value=result)
+    factory = make_factory()
+    tool = SimpleNamespace(name="beads_show", on_invoke_tool=invoke)
+
+    info = await factory._execute_init_tools(
+        [{"name": "beads_show"}], [tool], SimpleNamespace(stream_observer=None)
+    )
+
+    assert info.ok is False
+    assert str(info) == ""  # nothing that failed is injected as context
+    (failure,) = info.failures
+    assert failure.name == "beads_show" and failure.status == status
+    assert "beads_show" in info.failure_report("init_tools")
+
+
+async def test_a_missing_init_tool_makes_the_preparation_not_ok():
+    factory = make_factory()
+    info = await factory._execute_init_tools(
+        [{"name": "ghost"}], [], SimpleNamespace(stream_observer=None)
+    )
+
+    assert not info.ok
+    assert "not available" in info.failure_report()
+
+
+async def test_a_successful_init_tool_keeps_its_text_and_is_ok():
+    async def invoke(_ctx, _args):
+        return "3 open issues"
+
+    factory = make_factory()
+    info = await factory._execute_init_tools(
+        [{"name": "beads_list"}],
+        [SimpleNamespace(name="beads_list", on_invoke_tool=invoke)],
+        SimpleNamespace(stream_observer=None),
+    )
+
+    assert info.ok and "3 open issues" in info
+
+
+async def test_a_containers_init_tools_use_the_mounted_workspace():
+    """init_tools see /workspace, not the container's filesystem root."""
+    seen = []
+
+    async def invoke(_ctx, args):
+        seen.append(json.loads(args)["directory"])
+        return "indexed"
+
+    factory = make_factory()
+    factory.container_id = "grid-test-container"
+
+    await factory._execute_init_tools(
+        [{"name": "init_codegraph", "parameters": {"directory": "${working_directory}"}}],
+        [SimpleNamespace(name="init_codegraph", on_invoke_tool=invoke)],
+        SimpleNamespace(stream_observer=None),
+    )
+
+    assert seen == ["/workspace"]
+
+
+async def test_an_auto_run_tool_that_reports_failure_is_not_injected():
+    factory = make_factory()
+    config = auto_config({"name": "beads_init"})
+    tool = SimpleNamespace(
+        name="beads_init",
+        on_invoke_tool=AsyncMock(return_value="❌ Error: no beads database found"),
+    )
+
+    info, complete = await factory._execute_auto_run_tools(
+        "agent", config, [tool], ".", SimpleNamespace(stream_observer=None)
+    )
+
+    assert info == ""
+    # A failure is not a policy block: the one-time mark stays, as before.
+    assert complete
+
+
+async def test_a_raising_init_tool_keeps_its_error_for_the_caller():
+    async def invoke(_ctx, _args):
+        raise RuntimeError("tracker is down")
+
+    factory = make_factory()
+    info = await factory._execute_init_tools(
+        [{"name": "beads_show"}],
+        [SimpleNamespace(name="beads_show", on_invoke_tool=invoke)],
+        SimpleNamespace(stream_observer=None),
+    )
+
+    assert not info.ok
+    (failure,) = info.failures
+    assert failure.status == FAILED
+    assert "tracker is down" in failure.detail
+    assert "tracker is down" in info.failure_report()

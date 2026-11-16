@@ -8,6 +8,7 @@ every output is bounded.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -29,6 +30,7 @@ from core.action_policy import delegated_state
 from core.deadlines import Deadline, waiting_for_delegate
 from core.devices.hub import holding
 from core.factory.run_context import GridRunContext, get_runner, runner_max_turns
+from core.factory.turns import new_run_id, settle_task_bindings, start_lease_keeper
 from core.interruption import StopRequested
 from core.tool_packages import build_package_function_tool
 from core.run_stream import interrupted_run_report, run_output_text
@@ -778,6 +780,10 @@ class ToolAssembly:
                 execution_mode="serial_subtree" if parent_pipeline_id else None,
                 # The user's Stop reaches the sub-agent too: it ends after its step.
                 run_control=getattr(getattr(context, "context", None), "run_control", None),
+                # Its own identity: a task it claims is owned by this sub-agent
+                # run, not by the user or by the run that called it.
+                run_id=new_run_id("agent"),
+                parent_run_id=getattr(getattr(context, "context", None), "run_id", None),
             )
             # A sub-agent reports into its caller's view (the web trace, not the
             # console), through a child that keeps its prose out of the answer
@@ -811,6 +817,12 @@ class ToolAssembly:
                     # preparation that did not happen: the agent must not start
                     # as if it had its context. The caller sees the error.
                     logger.warning("Invalid init_tools for agent %s: %s", agent_key, exc)
+                    # Nothing was run under this run id, but its preparation
+                    # may already have claimed a task: settle it, don't leave
+                    # it owned by a run that never starts.
+                    settle_task_bindings(
+                        sub_run_ctx, "not_started", "the init_tools could not be read"
+                    )
                     return (
                         f"❌ Agent '{agent_key}' did not start: its init_tools are "
                         f"not a valid JSON list ({type(exc).__name__}: {exc}). "
@@ -839,6 +851,12 @@ class ToolAssembly:
                         "init_tools of agent %s did not finish: %s",
                         agent_key, init_info.failure_report(),
                     )
+                    # A step that succeeded before the failure may have claimed
+                    # a task. The model never starts, so this run must hand it
+                    # back as not started instead of leaving it claimed forever.
+                    settle_task_bindings(
+                        sub_run_ctx, "not_started", "the required preparation did not finish"
+                    )
                     return (
                         f"❌ Agent '{agent_key}' did not start: "
                         f"{init_info.failure_report('its required init_tools')}. "
@@ -862,6 +880,11 @@ class ToolAssembly:
                 f"includes {sub_context_id} to continue it where it stopped."
             )
             caller = getattr(getattr(context, "context", None), "context_id", None) or "default"
+            # How this sub-agent run ended, for the tasks it holds.
+            ending = "error"
+            # Its preparation and its model share one run identity: keep the
+            # tasks they claimed live while it works (core.tracker_lifecycle).
+            lease_keeper = start_lease_keeper(sub_run_ctx)
             try:
                 # The devices it uses are its own while it runs (core.devices.hub).
                 with waiting_for_delegate(), holding(f"{agent_key}-{sub_context_id}", default=caller):
@@ -890,20 +913,25 @@ class ToolAssembly:
                 if control is not None and control.stop_requested and result.final_output is None:
                     # Its finished steps are in its session; the caller is told
                     # it stopped, then stops after this step itself.
+                    ending = "cancelled"
                     output = interrupted_run_report(result, f"Agent {agent_key}", StopRequested())
                 else:
+                    ending = "completed"
                     output = run_output_text(result, f"Agent {agent_key}")
             except (MaxTurnsExceeded, ModelBehaviorError, AgentsUserError) as exc:
                 # The sub-agent stopped, but its caller goes on: it gets what the
                 # sub-agent did so far instead of a bare error, and can decide
                 # whether to retry without repeating work already done.
                 run_error = str(exc) or type(exc).__name__
+                ending = "attempt_limit" if isinstance(exc, MaxTurnsExceeded) else "error"
                 logger.warning("Sub-agent %s stopped: %s: %s", agent_key, type(exc).__name__, run_error)
                 output = interrupted_run_report(result, f"Agent {agent_key}", exc)
                 if isinstance(exc, MaxTurnsExceeded):
                     output += resume_note
             except TimeoutError as exc:
+                ending = "timeout"
                 if timeout <= 0 or not deadline.expired():
+                    ending = "error"
                     run_error = str(exc) or type(exc).__name__
                     raise
                 from core.factory.turns import TIMEOUT_REPORT, limit_report_seconds
@@ -923,9 +951,15 @@ class ToolAssembly:
                     else interrupted_run_report(result, f"Agent {agent_key}", TimeoutError(run_error))
                 ) + resume_note
             except BaseException as exc:
+                ending = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
                 run_error = str(exc) or type(exc).__name__
                 raise
             finally:
+                # The tasks this sub-agent claimed say how its run ended before
+                # its caller sees the answer (core.tracker_lifecycle).
+                if lease_keeper is not None:
+                    lease_keeper.stop()
+                settle_task_bindings(sub_run_ctx, ending)
                 reset_current_factory()
                 if nested_observer and hasattr(sub_observer, "finish"):
                     try:

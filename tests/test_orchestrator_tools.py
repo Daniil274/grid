@@ -635,3 +635,78 @@ agents:
     config_path.write_text(body.format(choice="false"), encoding="utf-8")
     sections = {section.key for section in Config(str(config_path)).build_agent_prompt_sections("lead")}
     assert "executor_models" not in sections
+
+
+def _fresh_book():
+    """The book of runs outside a conversation is process-wide: start it empty."""
+    from tools.orchestrator_tools import _LOOSE_EXECUTORS
+
+    _LOOSE_EXECUTORS.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_completed_executor_is_offered_to_continue_for_related_work():
+    _fresh_book()
+    factory = _resumable_factory([RunOutcome("first report"), RunOutcome("second report")])
+    first = await _call(factory, task="Read the retry docs and report the policy")
+    # Nothing else was run here yet, and an executor is never offered to itself.
+    assert first["status"] == "completed"
+    assert "reusable" not in first
+
+    second = await _call(factory, task="Now check the timeout defaults")
+
+    assert [entry["context_id"] for entry in second["reusable"]] == [first["context_id"]]
+    entry = second["reusable"][0]
+    assert entry["task"] == "Read the retry docs and report the policy"
+    assert entry["status"] == "completed"
+    assert entry["alive"] is True
+    assert "context_id" in second["reusable_note"]
+
+
+@pytest.mark.asyncio
+async def test_the_current_executor_is_not_listed_as_reusable():
+    _fresh_book()
+    factory = _resumable_factory([RunOutcome("one"), RunOutcome("two"), RunOutcome("three")])
+    first = await _call(factory, task="first area")
+    second = await _call(factory, task="second area")
+    third = await _call(factory, task="third area")
+
+    assert [entry["context_id"] for entry in third["reusable"]] == [
+        second["context_id"], first["context_id"],
+    ]
+    assert third["context_id"] not in [entry["context_id"] for entry in third["reusable"]]
+
+
+@pytest.mark.asyncio
+async def test_the_book_keeps_a_short_label_of_what_an_executor_is_for():
+    from tools.orchestrator_tools import _executor_book
+
+    _fresh_book()
+    factory = _resumable_factory([RunOutcome("done")])
+    handle = (await _call(factory, task="  Investigate   the\nretry policy of the client "))["context_id"]
+
+    record = _executor_book(factory, "ctx-0000aaaa")[handle]
+    assert record["task"] == "Investigate the retry policy of the client"
+    assert record["status"] == "completed"
+    assert record["model_key"] == "worker-model"
+
+
+@pytest.mark.asyncio
+async def test_the_reusable_list_stays_short():
+    from tools.orchestrator_tools import _REUSABLE_SHOWN
+
+    _fresh_book()
+    factory = _resumable_factory([RunOutcome(f"run {i}") for i in range(_REUSABLE_SHOWN + 3)])
+    for i in range(_REUSABLE_SHOWN + 2):
+        last = await _call(factory, task=f"area {i}")
+
+    assert len(last["reusable"]) == _REUSABLE_SHOWN
+    # Newest first: the executors run just before this one come first.
+    assert last["reusable"][0]["task"] == f"area {_REUSABLE_SHOWN}"
+
+
+def test_the_tool_tells_the_caller_to_continue_a_related_executor():
+    description = ORCHESTRATOR_TOOLS["orchestrate"].description or ""
+    assert "reusable" in description
+    assert "same area" in description
+    assert "parallel" in description

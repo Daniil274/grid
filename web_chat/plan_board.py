@@ -36,10 +36,11 @@ CLOSED = "closed"
 IN_PROGRESS = "in_progress"
 STATES = ("ready", "waiting", IN_PROGRESS, "blocked", CLOSED)
 
-#: Tools whose calls change the plan; ``orchestrate`` claims a task through
-#: the init_tools it hands its agent.
+#: Tools whose calls change the plan. ``orchestrate`` and ``Agent`` report on
+#: a task their init_tools named, and carry a claim only as a typed receipt.
 TRACKED_TOOLS = frozenset({
-    "beads_plan", "beads_create", "beads_update", "beads_close", "beads_dep", "orchestrate",
+    "beads_plan", "beads_create", "beads_update", "beads_close", "beads_dep",
+    "orchestrate", "Agent",
 })
 
 
@@ -70,11 +71,57 @@ def _created(output: Any) -> Optional[dict[str, Any]]:
 
 
 def _failed(output: Any) -> bool:
-    """Whether a tracker tool answered with an error instead of a result."""
+    """Whether a tracker tool answered with an error instead of a result.
+
+    A typed answer says so itself: ``isError`` is the contract. The ❌ prefix
+    is only the legacy shape of tools that still speak plain text; it is not
+    what a caller decides on when a typed payload exists.
+    """
+    data = _data(output)
+    if isinstance(data, dict) and "isError" in data:
+        return data.get("isError") is True
     if isinstance(output, str) and output.lstrip().startswith("❌"):
         return True
-    data = _data(output)
     return isinstance(data, dict) and bool(data.get("error"))
+
+
+def claim_receipt(answer: Any) -> Optional[dict[str, Any]]:
+    """The typed claim receipt the *host* holds, or None.
+
+    A claim is ownership, so it needs a receipt, not prose: the answer must say
+    ``isError: false`` explicitly and name the tracker tool, the task and the
+    state it confirmed. Two shapes are read, both of them the host's own: one
+    receipt the runtime holds in its hand (``{"tool": "beads_update", ...}``),
+    or an answer carrying them under ``receipts`` (or a single ``receipt``).
+
+    What this never reads is a model's text. A receipt without a tool is not
+    taken either - that is anyone's JSON, and a receipt is only worth something
+    when it says which tool produced it.
+    """
+    data = _data(answer)
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("tool"), str):
+        # The runtime's own receipt, already unwrapped.
+        candidates: list[Any] = [data]
+    else:
+        if data.get("isError") is not False:
+            return None
+        receipts = data.get("receipts")
+        if isinstance(receipts, list):
+            candidates = receipts
+        else:
+            single = data.get("receipt")
+            candidates = [single] if isinstance(single, dict) else []
+    for receipt in candidates:
+        if not isinstance(receipt, dict) or receipt.get("isError") is not False:
+            continue
+        if receipt.get("tool") != "beads_update":
+            continue
+        bead_id = receipt.get("bead_id") or receipt.get("id")
+        if isinstance(bead_id, str) and receipt.get("status") == IN_PROGRESS:
+            return receipt
+    return None
 
 
 # What a report of an orchestrate run keeps: what it did and what it cost, and
@@ -190,13 +237,16 @@ class PlanBoard:
 
     # -- what the trace saw ----------------------------------------------------
     def called(self, tool: str, arguments: Any) -> None:
-        """A call started: an agent launched on a task claims it."""
-        changed = False
-        for bead_id in claimed_task_ids(arguments):
-            # Taking up a task already in progress still makes it this turn's.
-            changed |= self._set(bead_id, IN_PROGRESS) | self._touch(bead_id)
-        if changed:
-            self._publish()
+        """A call started: nothing is shown yet.
+
+        A claim in an ``orchestrate``'s init_tools is an *intent*, and an
+        intent is not ownership: the executor may never start (its preparation
+        can fail, its policy can refuse it), and a board that showed the task
+        as in progress would report work nobody took. Ownership lands on the
+        board only through :meth:`apply_receipt`, which accepts a typed claim
+        receipt - never the prose of a completed agent.
+        """
+        return
 
     def finished(self, tool: str, arguments: Any, output: Any) -> None:
         """A tracker call answered: the board takes in what it changed."""
@@ -207,6 +257,12 @@ class PlanBoard:
         changed = False
         if tool == "beads_plan":
             changed = self._planned(args, _data(output))
+        elif tool in ("orchestrate", "Agent"):
+            # A completed agent's answer is a report and its prose - the
+            # model's, not the host's - so nothing in it proves a claim ran.
+            # Only the report lands here; ownership arrives through
+            # apply_receipt, called by the runtime that executed its own claim.
+            changed = self._reported(arguments, output)
         elif tool == "beads_create":
             result = _created(output)
             if result is not None:
@@ -221,8 +277,6 @@ class PlanBoard:
             changed = self._updated(args)
         elif tool == "beads_close":
             changed = self._closed(args)
-        elif tool == "orchestrate":
-            changed = self._reported(arguments, output)
         elif tool == "beads_dep":
             task = self._tasks.get(args.get("child_id"))
             parent = args.get("parent_id")
@@ -303,6 +357,26 @@ class PlanBoard:
         task["report"] = report
         self._touch(bead_id)
         return True
+
+    def apply_receipt(self, receipt: Any) -> bool:
+        """Show a claim only when the *host* confirms it with a typed receipt.
+
+        The entrypoint for a runtime that executed its own claim: it passes the
+        receipt it holds - one receipt, or an answer carrying ``receipts`` (see
+        :func:`claim_receipt`) - and the board takes the task as in progress.
+        Nothing on the trace path reaches this: an ``Agent`` run's answer is
+        prose and a report, and JSON a model wrote is not a receipt. An intent
+        in ``init_tools``, however plausible, is not called here either.
+        """
+        receipt = claim_receipt(receipt)
+        if receipt is None:
+            return False
+        bead_id = receipt.get("bead_id") or receipt.get("id")
+        # Taking up a task already in progress still makes it this turn's.
+        changed = self._set(bead_id, IN_PROGRESS) | self._touch(bead_id)
+        if changed:
+            self._publish()
+        return changed
 
     def _touch(self, bead_id: Any) -> bool:
         """Count a known task as this turn's; True when it was not yet."""

@@ -139,6 +139,15 @@ class GridRunContext:
     run_control: Optional[RunControl] = (
         None  # Graceful Stop of the user's turn, shared with its sub-agents
     )
+    run_id: Optional[str] = (
+        None  # This run's own identity: the owner of the tracker claims it makes
+    )
+    parent_run_id: Optional[str] = (
+        None  # The run that started this one (a delegated executor's caller)
+    )
+    task_bindings: List[Dict[str, Any]] = field(
+        default_factory=list
+    )  # Tracker tasks this run claimed, settled when it ends (core.tracker_lifecycle)
 
 def get_runner() -> Any:
     """The SDK's Runner as it is now, so a patched ``agents.Runner`` applies."""

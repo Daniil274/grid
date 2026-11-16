@@ -23,8 +23,22 @@ PLAN_RESULT = {
 }
 
 
+def receipt_answer(bead_id="p-1", **extra):
+    """A typed claim receipt in the shape web_chat.tasks_api's claim endpoint uses."""
+    return json.dumps({
+        "isError": False,
+        "receipt": {"tool": "beads_update", "isError": False, "bead_id": bead_id, "status": "in_progress"},
+        **extra,
+    })
+
+
 def plan_steps(harness):
     return [step for step in harness.steps() if step["kind"] == StepKind.PLAN.value]
+
+
+def host_claim(harness, bead_id="p-1"):
+    """Only the host's receipt channel, never an agent's output text."""
+    return harness.observer._plan.apply_receipt(json.loads(receipt_answer(bead_id)))
 
 
 def states(step):
@@ -61,7 +75,13 @@ def test_the_same_step_follows_the_tasks_through_their_agents():
     planned(harness)
     # The coordinator launches an agent that claims research through init_tools.
     init = [{"name": "beads_update", "parameters": {"bead_id": "p-1", "claim": True}}]
-    harness.feed(tool_called("orchestrate", "c2", json.dumps({"task": "p-1", "init_tools": json.dumps(init)})))
+    harness.feed(
+        tool_called("orchestrate", "c2", json.dumps({"task": "p-1", "init_tools": json.dumps(init)})),
+        # Ownership is shown from a typed receipt, not from the run's prose.
+        tool_output("c2", receipt_answer(status="running")),
+    )
+    assert states(plan_steps(harness)[0])["research"] == "ready"
+    host_claim(harness)
     assert states(plan_steps(harness)[0])["research"] == "in_progress"
 
     # Inside the agent's own block, it closes the task.
@@ -75,14 +95,31 @@ def test_the_same_step_follows_the_tasks_through_their_agents():
     assert step["plan"]["tasks"][0]["close_reason"] == "done"
 
 
-def test_regular_agent_init_tools_claim_marks_task_in_progress():
+def test_an_agents_finished_text_is_not_a_claim_only_a_receipt_is():
     harness = Harness()
     planned(harness)
     init = [
         {"name": "beads_show", "parameters": {"bead_id": "p-1"}},
         {"name": "beads_update", "parameters": {"bead_id": "p-1", "claim": True}},
     ]
-    harness.feed(tool_called("Agent", "c2", json.dumps({"input": "Work on p-1", "init_tools": json.dumps(init)})))
+    harness.feed(
+        tool_called("Agent", "c2", json.dumps({"input": "Work on p-1", "init_tools": json.dumps(init)})),
+        tool_output("c2", "The agent finished its turn."),
+    )
+    # A completed agent's prose is no proof that the claim in its init_tools
+    # ran: the board shows the task as it still is.
+    assert states(plan_steps(harness)[0])["research"] == "ready"
+
+    # The runtime that did execute the claim hands over its typed receipt.
+    claiming = Harness()
+    planned(claiming)
+    claiming.feed(
+        tool_called("Agent", "c2", json.dumps({"input": "Work on p-1", "init_tools": json.dumps(init)})),
+        tool_output("c2", receipt_answer()),
+    )
+    harness = claiming
+    assert states(plan_steps(harness)[0])["research"] == "ready"
+    host_claim(harness)
     assert states(plan_steps(harness)[0])["research"] == "in_progress"
 
     sub = harness.observer.nested("General-purpose", call_id="c2")
@@ -153,11 +190,12 @@ def test_an_orchestrate_report_lands_on_the_task_it_claimed():
     init = [{"name": "beads_update", "parameters": {"bead_id": "p-1", "claim": True}}]
     harness.feed(
         tool_called("orchestrate", "c2", json.dumps({"task": "Do the research", "init_tools": json.dumps(init)})),
-        tool_output("c2", json.dumps({
-            "status": "completed", "seconds": 12.5, "model_calls": 3, "model_key": "gpt",
-            "tokens": {"input": 100, "output": 40}, "cost_usd": 0.02, "final": "All providers listed.",
-        })),
+        tool_output("c2", receipt_answer(
+            status="completed", seconds=12.5, model_calls=3, model_key="gpt",
+            tokens={"input": 100, "output": 40}, cost_usd=0.02, final="All providers listed.",
+        )),
     )
+    host_claim(harness)
     research = plan_steps(harness)[-1]["plan"]["tasks"][0]
     assert research["state"] == "in_progress"
     # The report keeps what the run did and cost, and the text it answered with.
@@ -201,7 +239,9 @@ def test_one_report_of_a_run_over_several_tasks_lands_on_none_of_them():
     # One common report of a run over several tasks is no single task's own:
     # it lands on none of them rather than on all.
     assert all(task["report"] is None for task in step["plan"]["tasks"])
-    assert states(step)["research"] == "in_progress" and states(step)["compare"] == "in_progress"
+    # And the run's prose claims neither: only a typed receipt would, and a
+    # report over several tasks carries none.
+    assert states(step)["research"] == "ready" and states(step)["compare"] == "waiting"
 
 
 def test_a_report_without_an_explicit_existing_task_id_lands_on_no_task():
@@ -226,7 +266,24 @@ def test_a_failed_orchestrate_leaves_no_report():
         tool_output("c2", "❌ orchestrate: no access to AgentFactory (expected context.context.factory)."),
     )
     research = plan_steps(harness)[-1]["plan"]["tasks"][0]
-    assert research["report"] is None and research["state"] == "in_progress"
+    # The executor never started, so the claim in its init_tools never ran:
+    # the board shows the task as it still is, not as the call intended it.
+    assert research["report"] is None and research["state"] == "ready"
+
+
+def test_a_claim_is_shown_only_when_a_typed_receipt_confirms_it():
+    harness = Harness()
+    planned(harness)
+    init = [{"name": "beads_update", "parameters": {"bead_id": "p-1", "claim": True}}]
+    harness.feed(tool_called("orchestrate", "c2", json.dumps({"task": "Do the research", "init_tools": json.dumps(init)})))
+    # A call in flight has claimed nothing yet: its init_tools may still fail.
+    assert states(plan_steps(harness)[-1])["research"] == "ready"
+
+    harness.feed(tool_output("c2", receipt_answer()))
+    # JSON in an agent answer is still model prose, not host evidence.
+    assert states(plan_steps(harness)[-1])["research"] == "ready"
+    host_claim(harness)
+    assert states(plan_steps(harness)[-1])["research"] == "in_progress"
 
 
 def test_a_turn_without_tracker_calls_shows_no_plan():
@@ -431,7 +488,13 @@ def test_each_task_says_whether_this_turn_touched_it():
     events = []
     board = PlanBoard.continuing(TraceRecorder(events.append), stored)
     init = [{"name": "beads_update", "parameters": {"bead_id": "p-1", "claim": True}}]
-    board.called("orchestrate", json.dumps({"task": "research", "init_tools": json.dumps(init)}))
+    # A claim counts when the call that made it answered, not when it started.
+    board.finished(
+        "orchestrate",
+        json.dumps({"task": "research", "init_tools": json.dumps(init)}),
+        json.dumps({"status": "running"}),
+    )
+    board.apply_receipt(json.loads(receipt_answer()))
     board.finished("beads_close", {"bead_id": "p-3", "reason": "read"}, json.dumps({"id": "p-3"}))
 
     turn = {task["id"]: task["turn"] for task in events[-1]["step"]["plan"]["tasks"]}

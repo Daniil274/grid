@@ -14,6 +14,7 @@ import functools
 import inspect
 import logging
 import time
+import uuid
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -108,6 +109,15 @@ TIMEOUT_REPORT = (
 )
 
 
+def new_run_id(prefix: str) -> str:
+    """A run's own identity, the owner of the tracker claims it makes.
+
+    Short, printable and unique per run: two runs of one user must be two
+    owners in the task journal (core.tracker_lifecycle), never one shared name.
+    """
+    return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
 def outcome_for_stop(reason: StopReason) -> str:
     """How the runtime ended a run, as the task journal records it."""
     if reason == StopReason.TIMEOUT:
@@ -117,6 +127,60 @@ def outcome_for_stop(reason: StopReason) -> str:
     if reason in (StopReason.USER_STOP, StopReason.CRASH):
         return "cancelled"
     return "error"
+
+
+def _ending_detail(outcome: str) -> str:
+    """One line for the task journal: how the run ended, without guessing."""
+    if outcome == "completed":
+        return "the run finished; its executor did not close the task"
+    return f"the run ended ({outcome}) before the executor closed the task"
+
+
+def settle_task_bindings(run_ctx: Any, outcome: str, detail: str = "") -> None:
+    """Leave every task this run claimed with how the run actually ended.
+
+    Called in a run's ``finally`` - the one place every ending passes through
+    (an answer, a timeout, the turn limit, a cancellation, an error). It never
+    raises and never consults the model's last message: a claimed task is only
+    ``completed`` when the executor's own close was confirmed, otherwise the
+    journal says ``interrupted`` or ``needs_review`` (see core.tracker_lifecycle).
+    """
+    if run_ctx is None:
+        return
+    try:
+        from core import tracker_lifecycle
+
+        written = tracker_lifecycle.settle_run(run_ctx, outcome=outcome, detail=detail)
+    except Exception:  # noqa: BLE001 - a run that is already ending must not fail harder
+        logger.warning("could not record the tracker tasks this run held", exc_info=True)
+        return
+    if written:
+        logger.info(
+            "task bindings of run %s settled as %s: %s",
+            getattr(run_ctx, "run_id", None),
+            outcome,
+            ", ".join(f"{entry['bead_id']}={entry['state']}" for entry in written),
+        )
+
+
+def start_lease_keeper(run_ctx: Any) -> Optional[Any]:
+    """Start the run's background lease heartbeat, or None if it cannot.
+
+    The runtime owns its stop: every run path calls ``keeper.stop()`` in its
+    ``finally`` before settling bindings, so a normal end leaves no thread
+    behind, and a hard kill leaves no refresh (the lease then runs out -
+    see core.tracker_lifecycle.LeaseKeeper). A run without an identity has
+    nothing to keep alive.
+    """
+    if run_ctx is None or not getattr(run_ctx, "run_id", None):
+        return None
+    try:
+        from core import tracker_lifecycle
+
+        return tracker_lifecycle.LeaseKeeper(run_ctx).start()
+    except Exception:  # noqa: BLE001 - a heartbeat is not the run
+        logger.warning("could not start the task lease heartbeat", exc_info=True)
+        return None
 
 
 def limit_report_seconds(timeout: float) -> float:
@@ -396,6 +460,9 @@ class TurnRunner:
         run_control: Optional[Any] = None,
         timeout: Optional[float] = None,
         max_turns: Optional[int] = None,
+        run_id: Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        task_bindings: Optional[List[Dict[str, Any]]] = None,
     ) -> RunOutcome:
         """Run an Agent instance in its own session: its answer and what it took.
 
@@ -419,9 +486,17 @@ class TurnRunner:
         what the agent did so far. None is ``settings.agent_timeout``, as for a
         turn; 0 is no limit, for a caller that keeps a deadline of its own.
         ``max_turns`` bounds its turns the same way; None is ``settings.max_turns``.
+
+        ``run_id`` is this run's own identity (generated when omitted): a task
+        it claims in the tracker is bound to it (core.tracker_lifecycle), so a
+        second run cannot finish work it took. Whatever ends the run - its
+        answer, the timeout, the turn limit, a cancellation - settles those
+        bindings in the ``finally``, before the caller sees the outcome.
+        ``parent_run_id`` names the run that started this one.
         """
         observer = stream_observer or self._stream_observer
         agent_label = getattr(agent, "name", None) or "dynamic-agent"
+        run_id = run_id or new_run_id("run")
         context_id = context_id or self.context_manager.get_current_context_id()
         session = self._get_agent_session(agent_label, context_id)
         # A legacy session may still hold answers with the service footer.
@@ -444,7 +519,17 @@ class TurnRunner:
             run_control=run_control,
             # Agents this one delegates to report into the same view.
             stream_observer=stream_observer,
+            # This run's own identity: the owner of the tasks it claims, and the
+            # bindings its finally settles (core.tracker_lifecycle).
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            # A caller that already made a claim for this run (an executor's
+            # preparation) hands its list over, so one finally settles both.
+            task_bindings=list(task_bindings or []),
         )
+        # While the run lives, the tasks it holds stay its own even through a
+        # long model turn; the finally below stops it before settling.
+        lease_keeper = start_lease_keeper(run_ctx)
 
         attempt = 0
         recovered = False
@@ -465,6 +550,9 @@ class TurnRunner:
             max_turns = self.config.get_max_turns(agent_label)
         deadline = Deadline(timeout)  # paused while a call waits for the user (core.deadlines)
         set_current_factory(self)
+        # How this run ended, for the tasks it holds: an exception leaves the
+        # default, every path below that returns sets its own.
+        ending = "error"
         # What the run and its tools write without naming a conversation goes
         # into its own, never into one another turn made active.
         binding = self.context_manager.bind(context_id)
@@ -518,6 +606,7 @@ class TurnRunner:
                             )
                             if report:
                                 spent, result = used(), report_run
+                                ending = "attempt_limit"
                                 return RunOutcome(
                                     f"[Agent {agent_label} reached its turn limit; its report "
                                     f"of the work so far:]\n{report}",
@@ -525,6 +614,7 @@ class TurnRunner:
                                     *used(),
                                 )
                         stopped = STOPPED_MAX_TURNS if isinstance(exc, MaxTurnsExceeded) else STOPPED_ERROR
+                        ending = "attempt_limit" if isinstance(exc, MaxTurnsExceeded) else "error"
                         return RunOutcome(
                             interrupted_run_report(result, f"Agent {agent_label}", exc), stopped, *used()
                         )
@@ -542,9 +632,17 @@ class TurnRunner:
                         )
                         await asyncio.sleep(delay)
                         continue
+                    ending = "completed"
                     return RunOutcome(self._final_text(result, fragments), None, *used())
+        except asyncio.CancelledError:
+            # The hard Stop or the runtime going down: the task is cancelled
+            # wherever it was, and the tasks it claimed are left interrupted.
+            ending = "cancelled"
+            raise
         except TimeoutError:
+            ending = "timeout"
             if timeout <= 0 or not deadline.expired():
+                ending = "error"
                 raise
             logger.warning("Agent %s stopped after %s s", agent_label, timeout)
             if session is not None and not getattr(run_control, "stop_requested", False):
@@ -568,6 +666,11 @@ class TurnRunner:
             )
             return RunOutcome(report, STOPPED_TIMEOUT, *used())
         finally:
+            # Before the caller sees the outcome and on every way out: the tasks
+            # this run claimed now say how it ended, not "running" forever.
+            if lease_keeper is not None:
+                lease_keeper.stop()
+            settle_task_bindings(run_ctx, ending, _ending_detail(ending))
             self.context_manager.unbind(binding)
             reset_current_factory()
 
@@ -665,9 +768,10 @@ class TurnRunner:
         )
         instructions = assembly.instructions
         self.context_manager.set_metadata("last_context_assembly", assembly.to_debug_payload())
-        if not self.context_manager.get_metadata("agent_instructions"):
-            # Shown by the context inspector.
-            self.context_manager.set_metadata("agent_instructions", instructions)
+        # Shown by the context inspector and by the review evidence, which
+        # present it as the prompt of the latest answer: after a switch that
+        # must be the running agent's prompt, never the first agent's.
+        self.context_manager.set_metadata("agent_instructions", instructions)
         if agent_key not in self._logged_agents:
             Logger("agent_factory").log_verbose(f"FULL PROMPT STARTUP: {agent_key}", instructions)
             self._logged_agents.add(agent_key)
@@ -685,11 +789,12 @@ class TurnRunner:
         Only an empty session is seeded: that is the idempotency marker, and a
         compacted session already holds a summary of this conversation, which
         a second copy would duplicate. Everything the conversation still holds
-        is seeded: nothing is trimmed here - except by a compaction marker. A
-        conversation that was compacted seeds from its last marker: the summary
-        the marker holds and the dialogue stored after it, not the whole
-        pre-compaction history the compaction already replaced with that
-        summary. A session past the auto-compact threshold is summarized by
+        is seeded: nothing is trimmed here. A conversation that was compacted
+        seeds from its last marker: the summary the marker holds, then the
+        dialogue the compaction kept beside it (the compaction preserves the
+        user's and the assistant's own words) and the dialogue stored since -
+        never the tool calls and results the summary replaced. A session past
+        the auto-compact threshold is summarized by
         the turn's own ``compact_session`` right after seeding - the normal
         path, which keeps a summary of the whole history instead of silently
         dropping its earliest messages.
@@ -1204,11 +1309,20 @@ class TurnRunner:
             state = control.action_state
             if isinstance(state, ActionRunState):
                 state.task = f"{state.task}\n\nUser instruction added during the task:\n{steer.text}"
+            # The agent the user said it to - the turn running here - so the
+            # next agent is told what was asked while this one worked.
+            invocation = self.context_manager.get_metadata("last_invocation", context_id=context_id)
+            running = invocation.get("agent") if isinstance(invocation, dict) else None
             self.context_manager.append_message_to(
                 context_id,
                 "user",
                 steer.text,
-                metadata={"context_id": context_id, "type": "steer", "steer_id": steer.message_id},
+                metadata={
+                    "context_id": context_id,
+                    "type": "steer",
+                    "steer_id": steer.message_id,
+                    "agent": running,
+                },
             )
             if reported is not None:
                 reported(steer)
@@ -1390,7 +1504,12 @@ class TurnRunner:
         observer = stream_observer or self._stream_observer
         shown_message = message if message is not None else CONTINUE_TEXT
         execution = AgentExecution(
-            agent_name=agent_key, start_time=time.time(), input_message=shown_message
+            agent_name=agent_key,
+            start_time=time.time(),
+            input_message=shown_message,
+            # The same id this turn's messages carry: the run and its answer
+            # are joined by an explicit key, never by guessing.
+            turn_id=turn_id,
         )
         progress = RunProgress(input_preview=safe_preview(shown_message, max_length=700))
         control = RunControl()
@@ -1406,6 +1525,11 @@ class TurnRunner:
         streamed: List[str] = []
         session_log = None
         binding = None
+        run_ctx: Optional[GridRunContext] = None
+        lease_keeper = None
+        # How this turn ended, for the tasks it claimed: only an answer makes
+        # it "completed"; every early end sets its own reason.
+        ending = "error"
         try:
             active_context_id = self._open_context(context_id, use_active_context)
             # Everything this turn and the tasks it starts write without naming
@@ -1457,7 +1581,13 @@ class TurnRunner:
                 action_state=action_state,
                 stream_observer=observer,
                 run_control=control,
+                # The turn is a run of its own: a task its model claims belongs
+                # to it, and is settled when the turn ends (core.tracker_lifecycle).
+                run_id=new_run_id("turn"),
             )
+            # Keep the tasks this turn claims live through a long model run;
+            # the finally stops it before settling them.
+            lease_keeper = start_lease_keeper(run_ctx)
             control.action_state = action_state
             preamble = await self._auto_run_preamble(
                 agent_key,
@@ -1588,6 +1718,8 @@ class TurnRunner:
                 output, result, answered = self._interruption_text(interruption, "".join(streamed)), progress.result, False
 
             if answered:
+                ending = "completed"
+            if answered:
                 self.context_manager.append_message_to(
                     active_context_id,
                     "assistant",
@@ -1631,6 +1763,7 @@ class TurnRunner:
         except asyncio.CancelledError as cancelled:
             # The hard Stop, or the process shutting down: the task is cancelled
             # wherever it was. Record it and let the cancellation go on.
+            ending = "cancelled"
             if stored:
                 self._record_interruption(
                     context_id=active_context_id,
@@ -1696,5 +1829,10 @@ class TurnRunner:
                 from core.devices.hub import hub as device_hub
 
                 device_hub().release(active_context_id)
+            # The tasks this turn claimed now say how it ended - an answer, a
+            # stop, a timeout, a cancellation - never "running" forever.
+            if lease_keeper is not None:
+                lease_keeper.stop()
+            settle_task_bindings(run_ctx, ending, _ending_detail(ending))
             if binding is not None:
                 self.context_manager.unbind(binding)

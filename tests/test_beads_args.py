@@ -17,7 +17,9 @@ async def invoke(monkeypatch, tmp_path, tool, **arguments):
 
     def bd(args, **kwargs):
         calls.append(args)
-        return {"success": True, "output": "{}", "error": "", "data": {}, "exit_code": 0}
+        # A create answers with the task it made, so no marker lookup follows.
+        data = {"id": "p-9", "title": ""} if args[:1] == ["create"] else {}
+        return {"success": True, "output": "{}", "error": "", "data": data, "exit_code": 0}
 
     monkeypatch.setattr(beads_tools, "_run_bd_command", bd)
     context = ToolContext(
@@ -34,15 +36,25 @@ async def test_a_title_that_looks_like_a_flag_stays_the_title(monkeypatch, tmp_p
     )
     assert args[0] == "create" and args[-2:] == ["--", "--db=/elsewhere"]
     assert "--description=-x" in args and "--json" in args[:-2]
+    # The marker rides the same command, before the "--" that ends the options.
+    marker_at = args.index("--external-ref")
+    assert args[marker_at + 1].startswith("grid-op:") and marker_at < len(args) - 2
 
 
 async def test_update_and_close_carry_values_inside_their_flags(monkeypatch, tmp_path):
     _, [update] = await invoke(
         monkeypatch, tmp_path, beads_tools.beads_update, bead_id="p-1.2", title="-t", notes="--all"
     )
-    assert update == ["update", "p-1.2", "--json", "--title=-t", "--notes=--all"]
+    # The operation marker is one more flag; every caller value stays a value.
+    assert [a for a in update if not a.startswith("--set-metadata=")] == [
+        "update", "p-1.2", "--json", "--title=-t", "--notes=--all",
+    ]
+    assert any(a.startswith("--set-metadata=grid_op=") for a in update)
     _, [close] = await invoke(monkeypatch, tmp_path, beads_tools.beads_close, bead_id="p-1", reason="--force")
-    assert close == ["close", "p-1", "--reason=--force", "--json"]
+    # The close reason carries the marker in the same bd transaction.
+    assert close[:2] == ["close", "p-1"] and close[-1] == "--json"
+    reason = [a for a in close if a.startswith("--reason=")]
+    assert len(reason) == 1 and reason[0].startswith("--reason=--force [grid-op:")
 
 
 async def test_reads_and_writes_ask_bd_for_the_task_itself(monkeypatch, tmp_path):

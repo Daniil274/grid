@@ -10,6 +10,8 @@ to the current `AgentFactory` instance.
 from __future__ import annotations
 
 import asyncio
+import copy
+import inspect
 import json
 import logging
 import re
@@ -21,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from agents import RunContextWrapper, function_tool
 
+from core.factory.turns import new_run_id, settle_task_bindings
 from core.model_access import tally_spend
 from core.pricing import MICRO
 from core.run_stream import STOPPED_ERROR, RunOutcome
@@ -72,6 +75,47 @@ def _parse_json_from_text(text: str) -> Optional[Dict[str, Any]]:
         return val if isinstance(val, dict) else None
     except Exception:
         return None
+
+
+def _claimed_note(run_context: Any) -> str:
+    """What a failed preparation claimed, as a sentence the caller can act on."""
+    views = _task_binding_views(getattr(run_context, "task_bindings", None))
+    if not views:
+        return ""
+    described = ", ".join(f"{view['bead_id']}={view['state']}" for view in views)
+    return f" The tracker tasks its preparation claimed are recorded as: {described}."
+
+
+def _task_binding_views(bindings: Any) -> List[Dict[str, Any]]:
+    """The task bindings of an executor run, as the caller and the UI read them.
+
+    The facts come from the lifecycle journal, not from the executor's answer:
+    its state (``completed`` only after its own confirmed close, otherwise
+    ``interrupted``/``needs_review``), the outcome that left it there and the
+    run that owns it. A journal that cannot be read omits the entry rather
+    than inventing one.
+    """
+    from core import tracker_lifecycle
+
+    views: List[Dict[str, Any]] = []
+    for entry in bindings or []:
+        if not isinstance(entry, dict) or not entry.get("directory") or not entry.get("bead_id"):
+            continue
+        try:
+            view = tracker_lifecycle.lookup(entry["directory"], entry["bead_id"])
+        except Exception:  # noqa: BLE001 - a report may not invent a binding
+            view = None
+        if view:
+            views.append(
+                {
+                    key: view[key]
+                    for key in (
+                        "bead_id", "state", "outcome", "owner_run_id", "detail",
+                        "finished_at", "lease_expires_at", "takeover_from",
+                    )
+                }
+            )
+    return views
 
 
 def _coerce_optional_str(val: Any) -> Optional[str]:
@@ -283,6 +327,8 @@ def _executor_timeout(factory: Any, requested: Optional[int]) -> Optional[int]:
 
 _EXECUTORS_KEY = "orchestrate_executors"
 _EXECUTORS_KEPT = 40
+#: Executors named in a result's ``reusable`` list: enough to pick one, not a book dump.
+_REUSABLE_SHOWN = 5
 _LOOSE_EXECUTORS: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _LOOSE_KEPT = 200
 
@@ -329,6 +375,56 @@ def _keep_executor(factory: Any, chat_id: str, handle: str, record: Dict[str, An
         _LOOSE_EXECUTORS.pop(next(iter(_LOOSE_EXECUTORS)))
 
 
+def _task_label(task: str) -> str:
+    """A short label of a task, for the list of executors a caller may continue."""
+    label = " ".join(str(task or "").split())
+    return label[:80] + ("…" if len(label) > 80 else "")
+
+
+async def _executor_alive(factory: Any, chat_id: str, handle: str) -> bool:
+    """Whether the executor's history is still there, so continuing it resumes it."""
+    try:
+        session = factory._get_agent_session(_executor_name(handle), chat_id)
+        # One item is enough to know the history is there, however long it is.
+        items = session.get_items(limit=1)
+        if inspect.isawaitable(items):
+            items = await items
+        return bool(items)
+    except Exception:
+        # The book says this executor was made here; unreadable history is no proof it is gone.
+        logger.debug("orchestrate: cannot check executor %s of %s", handle, chat_id, exc_info=True)
+        return True
+
+
+async def _reusable_executors(factory: Any, chat_id: str, handle: str) -> List[Dict[str, Any]]:
+    """Executors of this conversation a follow-up could continue, newest first.
+
+    Completed ones are included: a finished executor still holds what it did, and
+    continuing it is cheaper than a new agent learning the same ground again. The
+    current executor is left out - the caller already has its report.
+    """
+    book = _executor_book(factory, chat_id)
+    shown: List[Dict[str, Any]] = []
+    for other, record in reversed(list(book.items())):
+        if other == handle or not isinstance(record, dict):
+            continue
+        entry: Dict[str, Any] = {
+            "context_id": other,
+            "task": record.get("task") or "",
+            "status": record.get("status") or "unknown",
+            "alive": await _executor_alive(factory, chat_id, other),
+        }
+        for key in ("tier", "model", "model_key"):
+            if record.get(key):
+                entry[key] = record[key]
+        if record.get("runs"):
+            entry["runs"] = record["runs"]
+        shown.append(entry)
+        if len(shown) >= _REUSABLE_SHOWN:
+            break
+    return shown
+
+
 #: Put before the task of a continued executor.
 _CONTINUED = (
     "[You are continuing your earlier work on this assignment: your previous "
@@ -365,6 +461,14 @@ async def orchestrate(
     cost when known, and its context_id. Several orchestrate calls inside
     ``parallel`` run at the same time.
 
+    Reuse an executor for related work. Every result lists ``reusable``: the
+    other executors of this conversation, completed ones included, with their
+    context_id, task label and whether their history is still there. For a
+    related subtask in the same area, continue one of them by its context_id
+    instead of starting a new agent: it already has the ground it covered. A
+    new agent is for a new area. Independent subtasks are still run in
+    parallel, as now; reuse is for the sequential follow-ups of one area.
+
     Args:
         task: What the agent should do and what to report back. When continuing an
             agent, what it should do next, e.g. "Finish the remaining steps and report".
@@ -373,8 +477,9 @@ async def orchestrate(
         context_id: Empty starts a new agent. The context_id from an earlier orchestrate
             result of this conversation continues that agent: it keeps everything it already
             did (a long history is summarized first) and its role, tools and model unless
-            you pass new ones. Use it after status timeout or max_turns, or to give the same
-            agent a follow-up, instead of starting over.
+            you pass new ones. Use it after status timeout or max_turns, and for a related
+            subtask in the same area (a completed executor can be continued too), instead of
+            starting over.
         init_tools: JSON list of tool calls made before the agent starts; their results go
             into its instructions. Format: '[{"name": "tool_name", "parameters": {...}}]'.
         system_skills: Skill names to load for the agent, as a list or comma-separated.
@@ -403,6 +508,8 @@ async def orchestrate(
     from core.tracing.pipeline_registry import PipelineRegistry, PipelineStatus
     from core.deadlines import waiting_for_delegate
     from core.devices.hub import holding
+    from core.factory.auto_run import PreparationFailed
+    from utils.exceptions import AgentError
 
     registry = PipelineRegistry()
     raw_ctx = getattr(context, "context", None)
@@ -482,13 +589,21 @@ async def orchestrate(
     if init_tools:
         try:
             parsed = json.loads(init_tools)
-            if isinstance(parsed, list):
-                parsed_init_tools = parsed
-            else:
-                logger.warning(f"orchestrate: init_tools must be a JSON array, got {type(parsed).__name__}")
+            if not isinstance(parsed, list):
+                raise ValueError(
+                    f"expected a JSON array, got {type(parsed).__name__}"
+                )
+            parsed_init_tools = parsed
         except Exception as e:
+            # Explicit init_tools are required: a list that cannot be read is
+            # a preparation that did not happen. The executor does not start
+            # without it, and the caller sees why - never a silent start
+            # without the context it asked for.
             logger.warning(f"orchestrate: cannot parse init_tools JSON: {e} — value: {init_tools[:200]}")
-            notes.append(f"init_tools was not valid JSON ({e}); the agent started without them")
+            return (
+                f"❌ orchestrate: the executor did not start: init_tools is not "
+                f"a valid JSON list ({type(e).__name__}: {e}). Nothing was run."
+            )
     if parsed_init_tools is None:
         # Run again on a continued executor: what they read (its task in the
         # tracker, say) is current, and they belong to its instructions.
@@ -507,18 +622,55 @@ async def orchestrate(
         getattr(raw_ctx, "action_state", None), "orchestrate", task
     )
 
-    executor = await factory.create_dynamic_agent(
-        name=_executor_name(handle),
-        instructions=base_instructions,
-        model_key=resolved_model_key,
-        tool_names=coerced_executor_tools,
-        init_tools=parsed_init_tools,
-        system_skills=coerced_system_skills,
-        action_state=action_state,
-        fallback_model_keys=fallback_model_keys,
-    )
+    # The executor is a run of its own. A task its preparation claims belongs
+    # to this executor run id - not to the caller's turn and not to the user,
+    # who may run several executors at once - and the run's finally settles it
+    # (core.tracker_lifecycle). The same list is handed to the run, so a claim
+    # made by init_tools and one made by the executor are settled together.
+    executor_run_id = new_run_id("exec")
+    # A shallow copy (not dataclasses.replace): the context a tool receives is
+    # a GridRunContext in production and a stand-in in tests.
+    executor_ctx = copy.copy(raw_ctx)
+    executor_ctx.run_id = executor_run_id
+    executor_ctx.parent_run_id = getattr(raw_ctx, "run_id", None)
+    executor_ctx.task_bindings = []
+
+    try:
+        executor = await factory.create_dynamic_agent(
+            name=_executor_name(handle),
+            instructions=base_instructions,
+            model_key=resolved_model_key,
+            tool_names=coerced_executor_tools,
+            init_tools=parsed_init_tools,
+            system_skills=coerced_system_skills,
+            action_state=action_state,
+            fallback_model_keys=fallback_model_keys,
+            # The executor's init_tools act for the caller's user in its
+            # container, under its observer and stop control - not in a blank
+            # context of their own - and under the executor's own run identity.
+            run_context=executor_ctx,
+        )
+    except PreparationFailed as failed:
+        # Required preparation (read the task, claim it) did not finish: no
+        # executor was started, and the caller gets the real reason. A policy
+        # refusal arrives here too and is not retried or worked around.
+        logger.warning("orchestrate: executor %s did not start: %s", handle, failed)
+        settle_task_bindings(
+            executor_ctx, "not_started", "the executor did not start after its preparation"
+        )
+        return f"❌ orchestrate: {failed}. The executor did not start; nothing was run." + _claimed_note(executor_ctx)
+    except AgentError as error:
+        # The executor could not be built (its model is not available, say):
+        # the caller is told instead of receiving an empty report.
+        logger.warning("orchestrate: executor %s was not created: %s", handle, error)
+        settle_task_bindings(
+            executor_ctx, "not_started", "the executor was not created"
+        )
+        return f"❌ orchestrate: the executor did not start: {error}" + _claimed_note(executor_ctx)
 
     record = {
+        # What it is about: the label a later call sees in ``reusable``.
+        "task": _task_label(task),
         "instructions": base_instructions,
         "tools": coerced_executor_tools,
         "skills": coerced_system_skills,
@@ -580,6 +732,9 @@ async def orchestrate(
                     user_id=ctx_user_id,
                     run_control=getattr(raw_ctx, "run_control", None),
                     timeout=run_timeout,
+                    run_id=executor_run_id,
+                    parent_run_id=getattr(raw_ctx, "run_id", None),
+                    task_bindings=executor_ctx.task_bindings,
                 )
 
             # The caller's clock stops while its executor works under its own;
@@ -593,6 +748,7 @@ async def orchestrate(
                 )
         except asyncio.CancelledError:
             run_error = "Cancelled"
+            settle_task_bindings(executor_ctx, "cancelled", "the executor was cancelled")
             _keep_executor(factory, active_context_id, handle, {**record, "status": "stopped"})
             # Task was cancelled - check if it was emergency shutdown
             status = await registry.get_pipeline_status(pipeline_id)
@@ -622,6 +778,7 @@ async def orchestrate(
             raise
         except Exception as exec_err:
             run_error = f"Executor failed: {exec_err}"
+            settle_task_bindings(executor_ctx, "error", f"the executor failed: {exec_err}")
             logger.error(f"orchestrate: executor failed | error={exec_err}")
             outcome = RunOutcome(f"❌ Executor failed: {exec_err}", STOPPED_ERROR)
         finally:
@@ -638,7 +795,10 @@ async def orchestrate(
         resolved_model_key = executor_model_key
 
     status = outcome.stopped or "completed"
-    _keep_executor(factory, active_context_id, handle, {**record, "status": status})
+    _keep_executor(
+        factory, active_context_id, handle,
+        {**record, "status": status, "model_key": resolved_model_key},
+    )
 
     # The tools the executor really had: a name the factory could not resolve
     # (a typo, a tool of an MCP server that did not start) is reported, so the
@@ -674,6 +834,16 @@ async def orchestrate(
             f'orchestrate(context_id="{handle}", task="<what to do next>") continues this agent '
             "where it stopped, with what it already did; do not start the task over."
         )
+    reusable = await _reusable_executors(factory, active_context_id, handle)
+    if reusable:
+        # Not only the stuck ones: a finished executor still knows its ground,
+        # and continuing it is cheaper than a new agent learning it again.
+        result["reusable"] = reusable
+        result["reusable_note"] = (
+            "Other executors of this conversation, completed ones included: for a related "
+            "subtask in the same area, continue one by its context_id; start a new agent "
+            "only for a new area. Independent subtasks still run in parallel."
+        )
     if notes:
         result["notes"] = notes
     if tally.calls:
@@ -684,6 +854,16 @@ async def orchestrate(
                 f"{tally.subscription_calls} of {tally.calls} calls ran on a subscription: "
                 "priced at API rates, not billed"
             )
+    task_bindings = _task_binding_views(executor_ctx.task_bindings)
+    if task_bindings:
+        # The tasks this executor claimed, with how its run really left them;
+        # ``completed`` only when its own close was confirmed by the tracker.
+        result["task_bindings"] = task_bindings
+        result["task_bindings_note"] = (
+            "These tasks are bound to this executor run. A task left "
+            "interrupted or needs_review was claimed and not closed: continue "
+            "this executor, or claim it in a new run after its lease expires."
+        )
     if missing_tools:
         result["missing_tools"] = missing_tools
         result["missing_tools_note"] = (
