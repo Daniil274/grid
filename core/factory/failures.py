@@ -26,6 +26,7 @@ from openai import (
 
 from core.fallback_model import AllModelsFailedError
 from core.bounded_model import ModelRequestLimit
+from core.credentials import credential_error_in
 
 logger = logging.getLogger("grid.agent_factory")
 
@@ -98,8 +99,17 @@ def is_transient_message(message: str) -> bool:
 
 def is_retriable(exc: BaseException) -> bool:
     """Whether a failed model call is worth another attempt."""
-    if isinstance(exc, (AllModelsFailedError, ModelRequestLimit)):
+    if isinstance(exc, ModelRequestLimit):
         return False
+    if isinstance(exc, AllModelsFailedError):
+        # A chain shortened to one live model still carries that model's own
+        # failure: its transient outage is worth another attempt, though the
+        # message names the models that were skipped. Several failures mean at
+        # least one was not transient, and the whole is final.
+        cause = exc.cause
+        if cause is None or credential_error_in(cause) is not None:
+            return False  # a refused credential is the key's, not an outage
+        return is_retriable(cause)
     if any(marker in str(exc).lower() for marker in _SPENT_ACCOUNT_MARKERS):
         return False
     if isinstance(exc, _TRANSIENT_ERRORS):

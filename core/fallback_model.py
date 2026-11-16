@@ -17,8 +17,10 @@ import asyncio
 import logging
 import re
 from collections import deque
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, FrozenSet, Optional, Sequence
+from typing import Any, AsyncIterator, Dict, FrozenSet, Iterator, Optional, Sequence
 
 from agents.models.interface import Model
 import httpx
@@ -98,26 +100,67 @@ def failed_note(modality: str, model: str, able: Sequence[str]) -> str:
 #: A status a backend reports in words rather than in a typed error.
 _STATUS_IN_TEXT = re.compile(r"\b(?:408|409|425|429|5\d\d)\b")
 
+#: A typed status that says this route cannot serve the request now: the key or
+#: the account behind this model is refused (401-403), the model it names is not
+#: there (404), or the backend is out of reach or out of quota (408-5xx). Another
+#: model of another provider may still answer, so the chain moves on.
+_ROUTE_STATUSES = frozenset({401, 402, 403, 404, 408, 409, 425, 429, 500, 502, 503, 504})
+
+#: A provider's own words for a refusal of the request itself, on any transport.
+#: These stay terminal: a denied request must not be replayed on another model.
+_POLICY_MARKERS = (
+    "policy_deny", "policy deny", "policy_filter",
+    "action declined", "declined by the user", "declined by user",
+    "content_filter", "content filter", "content_policy", "content policy",
+    "safety", "refusal",
+)
+
+#: Words that may be either a policy refusal or a refused route ("not
+#: authorized" for this key). A typed HTTP status already told the two apart, so
+#: they only decide for backends that report their failure in words alone.
+_AUTHORITY_MARKERS = ("permission denied", "not authorized", "not allowed")
+
+
+def _provider_words(exc: BaseException) -> str:
+    """The exception's own message plus the provider's response body, lowered.
+
+    A typed HTTP error carries its reason in the body; the SDK only sometimes
+    repeats it in the message, and a 403 that names a content policy must still
+    read as a refusal rather than as a refused route.
+    """
+    parts = [str(exc)]
+    body = getattr(exc, "body", None)
+    if body is not None:
+        parts.append(str(body))
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            parts.append(response.text[:2000])
+        except (RuntimeError, ValueError):  # never read (a stream) or not text
+            logger.debug("fallback: the provider's error body was not read")
+    return " ".join(parts).lower()
+
 
 def can_fallback(exc: BaseException) -> bool:
     """Only technical unavailability, never a policy refusal or a bad request.
 
     CLI backends report quota errors as text; API backends have typed errors.
+    A typed 401/402/403/404 is the route's refusal, not the request's: the key,
+    the account or the model is what cannot serve it, so the next model is
+    tried. A policy or content refusal is terminal whatever carried it.
     Unknown failures fail closed rather than moving a denied request elsewhere.
     """
-    text = str(exc).lower()
-    if any(marker in text for marker in (
-        "policy_deny", "policy deny", "policy_filter", "declined",
-        "content_filter", "content filter", "content_policy", "safety",
-        "permission denied", "not authorized", "not allowed", "refusal",
-    )):
+    text = _provider_words(exc) if isinstance(exc, APIStatusError) else str(exc).lower()
+    if any(marker in text for marker in _POLICY_MARKERS):
         return False
     if refused_modality(exc) is not None:
         return True
     if credential_error_in(exc) is not None or isinstance(exc, CredentialError):
         return True
     if isinstance(exc, APIStatusError):
-        return exc.status_code in {408, 409, 425, 429, 500, 502, 503, 504}
+        return exc.status_code in _ROUTE_STATUSES
+    if any(marker in text for marker in _AUTHORITY_MARKERS):
+        return False
     if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException,
                         httpx.NetworkError, httpx.RemoteProtocolError, APIConnectionError)):
         return True
@@ -141,20 +184,124 @@ def can_fallback(exc: BaseException) -> bool:
 
 
 def _stream_failure(event: Any) -> BaseException:
-    """Retain the provider's reason: failed/incomplete alone is not retryable."""
+    """Retain the provider's reason, and say whether the next model may answer.
+
+    A ``response.failed`` that names no reason at all is the backend dropping a
+    request it never explained: with nothing to call a refusal, the reserve gets
+    it. A ``response.incomplete`` is this model's own cut-off (a token or
+    content limit), which another model must not silently repeat.
+    """
+    kind = getattr(event, "type", "response.failed")
     response = getattr(event, "response", None)
     detail = getattr(response, "error", None) or getattr(response, "incomplete_details", None)
     code = getattr(detail, "code", None) or getattr(detail, "reason", None)
     message = getattr(detail, "message", None)
-    return _StreamFailure(f"{getattr(event, 'type', 'response.failed')}: {code or ''} {message or ''}")
+    unnamed = kind == "response.failed" and not code and not message
+    return _StreamFailure(f"{kind}: {code or ''} {message or ''}", fallback=unnamed)
 
 
 class _StreamFailure(Exception):
-    """An in-stream provider failure event, raised before anything committed."""
+    """An in-stream provider failure event, raised before anything committed.
+
+    ``fallback``: whether the chain may try the next model. Only a failure event
+    that carries no reason at all sets it; everything else is judged by
+    :func:`can_fallback` like any other exception.
+    """
+
+    def __init__(self, message: str, *, fallback: bool = False) -> None:
+        super().__init__(message)
+        self.fallback = fallback
 
 
 class AllModelsFailedError(RuntimeError):
-    """Raised after every configured model failed the same request."""
+    """Raised after every configured model failed the same request.
+
+    ``cause``: the one failure behind it when the chain held a single live model
+    and was shortened by skipped ones. That model's own verdict still decides
+    whether the run is retried (core.factory.failures.is_retriable), while the
+    message names the models that were never tried.
+    """
+
+    def __init__(self, message: str, cause: Optional[BaseException] = None) -> None:
+        super().__init__(message)
+        self.cause = cause
+
+
+class ModelSelection:
+    """A transient, shared record of the candidate a live stream runs on.
+
+    The web chat wants to show the model that actually answers, including a
+    candidate reached only after a fallback. That fact must not travel in the
+    response text or in anything stored, so it lives here for the duration of
+    one turn: the consumer creates a selection, binds it with
+    :func:`model_selection` before starting the run, and reads
+    :func:`selected_model_key` while it consumes the stream.
+
+    It is a mutable object rather than a ContextVar value because the Agents
+    SDK runs the model stream in a background task: a value set inside that
+    task would not be visible to the consumer's task. The task inherits the
+    binding (and this object) by reference, so what it records here is what
+    the consumer reads.
+    """
+
+    __slots__ = ("_key",)
+
+    def __init__(self) -> None:
+        self._key: Optional[str] = None
+
+    @property
+    def key(self) -> Optional[str]:
+        """The candidate of the latest live stream, or None before one commits."""
+        return self._key
+
+    def selected(self, key: str) -> None:
+        """Record that *key* now produces the live stream."""
+        self._key = key
+
+
+#: The selection of the turn in progress; a consumer binds one per turn.
+_SELECTION: ContextVar[Optional[ModelSelection]] = ContextVar(
+    "grid_model_selection", default=None
+)
+
+
+@contextmanager
+def model_selection(selection: ModelSelection) -> Iterator[ModelSelection]:
+    """Report the live stream's model into *selection* inside this block.
+
+    Bind it in the task that will read the answer, before the run starts: the
+    Agents SDK starts the model stream in a child task, which inherits this
+    binding and shares *selection*. The binding is reset on exit, so a later
+    turn (or a concurrent one) never inherits a stale key.
+    """
+    token = _SELECTION.set(selection)
+    try:
+        yield selection
+    finally:
+        _SELECTION.reset(token)
+
+
+def selected_model_key() -> Optional[str]:
+    """The model key of the live stream in this context, or None.
+
+    This is the read side for a stream observer: call it while handling a
+    stream event of the turn bound with :func:`model_selection`.
+    """
+    selection = _SELECTION.get()
+    return selection.key if selection is not None else None
+
+
+def _report_model_key(key: str) -> None:
+    """Record *key* for the bound selection, creating an implicit one if none.
+
+    An unbound call (a direct caller, a test) still gets a record in its own
+    context instead of silently doing nothing.
+    """
+    selection = _SELECTION.get()
+    if selection is None:
+        selection = ModelSelection()
+        _SELECTION.set(selection)
+    selection.selected(key)
 
 
 @dataclass(frozen=True)
@@ -289,7 +436,11 @@ class FallbackModel(Model):
         message = "All configured models failed: " + " | ".join(errors or ["no model was tried"])
         if self.skipped:
             message += ". Not tried: " + "; ".join(f"{key} ({why})" for key, why in self.skipped)
-        return AllModelsFailedError(message)
+        # The single failure behind a shortened chain keeps its own verdict on
+        # retrying: a transient outage is still worth another attempt, and the
+        # message above carries the models that were never tried.
+        cause = originals[0] if len(originals) == 1 else None
+        return AllModelsFailedError(message, cause=cause)
 
     async def get_response(self, *args: Any, **kwargs: Any) -> Any:
         errors: list[str] = []
@@ -340,13 +491,17 @@ class FallbackModel(Model):
                         if event_type in _LIFECYCLE_EVENT_TYPES:
                             continue
                         committed = True
+                        # This candidate now produces the live stream: publish
+                        # it before its first event reaches the consumer, so an
+                        # observer attributes every event of the turn correctly.
+                        _report_model_key(candidate.key)
                         for initial in events:
                             yield initial
                         events.clear()
                     else:
                         yield event
             except _StreamFailure as failure:
-                if not can_fallback(failure):
+                if not failure.fallback and not can_fallback(failure):
                     raise
                 errors.append(f"{candidate.key}: {failure}")
                 originals.append(failure)

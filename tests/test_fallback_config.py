@@ -23,6 +23,7 @@ SYSTEMS = {
         "web_spider",
     ],
     "examples/system-builder/config.yaml": ["builder"],
+    "examples/coordinator-pipeline/config.yaml": ["coordinator", "general_purpose"],
     "systems/artex-explorer/config.yaml": [
         "main",
         "decomposer",
@@ -76,12 +77,12 @@ def test_a_paid_openrouter_route_is_never_the_only_way_out(relative_path, agents
 
 
 def test_engineer_chain_crosses_three_providers():
-    """Kimi Code, then ChatGPT, then OpenCode: no single provider ends a run."""
+    """ChatGPT, then Kimi Code, then OpenCode: no single provider ends a run."""
     config = _config("examples/coder/config.yaml")
     keys, providers = _chain(config, "engineer")
 
-    assert keys == ["kimi-k3.1-pro", "gpt-6-luna", "deepseek-flash-latest"]
-    assert providers == ["kimi-code", "chatgpt", "opencode"]
+    assert keys == ["gpt-6.1-sol", "kimi-k3.1-pro", "deepseek-flash-latest"]
+    assert providers == ["chatgpt", "kimi-code", "opencode"]
     assert len(set(providers)) == len(providers), (
         "each engineer model must belong to its own provider"
     )
@@ -98,6 +99,14 @@ def test_the_kimi_route_is_the_one_a_plus_membership_pays_for():
     # The Kimi Code API takes the short id; the version name falls back to
     # another model there without an error.
     assert config.get_model("kimi-k3.1-pro").name == "k3.1-pro"
+
+
+def test_coordinator_can_continue_when_kimi_and_openrouter_are_exhausted():
+    config = _config("examples/coordinator-pipeline/config.yaml")
+    keys, providers = _chain(config, "coordinator")
+    assert keys[0] == "kimi-k2.6", "the coordinator runs Kimi K2.6 via OpenRouter"
+    assert providers[0] == "openrouter"
+    assert {"opencode"}.issubset(providers[1:]), "a reserve off OpenRouter stays behind it"
 
 
 def test_builder_reserve_crosses_providers():
