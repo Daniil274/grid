@@ -8,6 +8,7 @@ export const ICONS = {
   users: "M9 4a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zM2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 6.5M18.5 20a6.5 6.5 0 0 0-3-5.5",
   key: "M8 11a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM11 13.5L20 5M16.5 8.5l2.5 2.5M14 11l2 2",
   send: "M4 12l16-8-6 8 6 8z",
+  mic: "M9 6a3 3 0 0 1 6 0v6a3 3 0 0 1-6 0V6zM5 11v1a7 7 0 0 0 14 0v-1M12 19v3M8 22h8",
   stop: "M7 7h10v10H7z",
   resume: "M8 5v14l11-7z",
   compact: "M4 3v4h16V3M4 21v-4h16v4M8 10l4 3 4-3M8 14l4-3 4 3",
@@ -17,8 +18,13 @@ export const ICONS = {
   edit: "M4 20h4L20 8l-4-4L4 16z",
   folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
   monitor: "M3 5h18v11H3zM8 20h8M12 16v4",
+  // The server's own mark (`Cloud` in ui/target-picker.js): work that stays
+  // here, on no computer of the user's.
+  cloud: "M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9z",
   trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
   undo: "M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3",
+  // A circular arrow: the same request, sent again.
+  repeat: "M19.5 12a7.5 7.5 0 1 1-2.2-5.3M17.3 6.7V2.9M17.3 6.7h-3.8",
   fork: "M6 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM18 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM12 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM6 7v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7M12 12v5",
   sliders: "M4 7h10M18 7h2M4 17h4M12 17h8M15 4v6M8 14v6",
   clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",

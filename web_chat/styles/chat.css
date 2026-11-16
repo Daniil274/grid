@@ -256,6 +256,21 @@
   color: var(--danger);
 }
 
+/* The turn's ending context size, beside the actions: a quiet number, not a
+   button, and only when the turn reported one. */
+.msg__contextTokens {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 6px;
+  order: -1;
+  color: var(--text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: default;
+}
+
 /* The user's own turn: a right-aligned bubble, so the thread scans as dialogue. */
 .msg[data-role="user"] {
   justify-items: end;
@@ -607,6 +622,7 @@
 }
 
 .composer {
+  position: relative;
   max-width: var(--content-width);
   margin: 0 auto;
   padding: 10px 12px 8px;
@@ -618,7 +634,7 @@
 }
 
 .composer:focus-within {
-  border-color: var(--accent-line);
+  border-color: var(--accent);
 }
 
 .composer__input {
@@ -637,16 +653,14 @@
   outline: none;
 }
 
-/* The subtle border on the wrapper is not a focus ring: keep a keyboard one. */
-.composer__input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
+/* The composer's own border is the field's focus ring: the wrapper IS the
+   input field, so its border turns accent while you type. A second ring
+   around the transparent textarea would cross the button row below it. */
 
 .composer__bar {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+  flex-wrap: nowrap;
+  gap: 8px;
   align-items: center;
   justify-content: space-between;
 }
@@ -658,10 +672,112 @@
 
 .composer__buttons {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   margin-left: auto;
   gap: 8px;
+}
+
+/* Secondary actions are one disclosure, not another row of competing buttons. */
+.composerTools { flex: none; }
+.composerTools__toggle { list-style: none; cursor: pointer; }
+.composerTools__toggle::-webkit-details-marker { display: none; }
+.composerTools[open] .composerTools__toggle {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.composerTools[open] .composerTools__toggle > .icon { transform: rotate(45deg); }
+.composerTools__panel {
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  bottom: calc(100% + 8px);
+  display: grid;
+  gap: 4px;
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(50dvh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+  box-shadow: var(--shadow-2);
+}
+.composerTools:not([open]) .composerTools__panel { display: none; }
+.composerTools__heading {
+  padding: 4px 10px 8px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.composerTools__action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13px;
+  text-align: left;
+}
+.composerTools__action:hover { background: var(--bg-3); color: var(--text); }
+.composerTools__action:disabled { opacity: .45; cursor: default; }
+.composerTools__action > svg { flex: none; }
+.composerTools__setting {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--text-3);
+  font-size: 12px;
+}
+.composerTools__setting:has(select[hidden]) { display: none; }
+.composerTools__setting select { width: 100%; max-width: 100%; min-height: 40px; }
+.composer__audio { border-radius: var(--radius-pill); }
+/* Send (and the Stop it turns into) keeps the app-wide .btn rounding
+   (--radius-sm): a rounded rectangle in the same language as every other
+   button, instead of a near-pill or a dot next to the input. */
+.composer__audio[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.composerRecording {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+}
+.composerRecording[hidden] { display: none; }
+.composerRecording__dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+.composerRecording__label { min-width: 0; color: var(--text-2); font-size: 12px; }
+.composerRecording__time {
+  margin-left: auto;
+  padding-right: 4px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.composer.is-recording .composer__input,
+.composer.is-recording .composer__hint,
+.composer.is-recording .composerTools { display: none; }
+.composerTools__toggle:focus-visible,
+.composerTools__action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* A phone on its side: little height. The bar and the composer shrink to a
@@ -689,6 +805,7 @@
   }
 
   .composer__input {
+    font-size: 16px; /* iOS must not zoom the whole chat on focus. */
     flex: 1 1 160px;
     width: auto;
     max-height: 26vh;
@@ -722,18 +839,17 @@
 }
 
 @media (max-width: 720px) {
-  .composer__compact .compactLabel { display: none; }
-  .composer__compact { padding: 0 10px; }
   .chatScroll {
     padding: 18px 12px 4px;
   }
 
   .composerWrap {
-    padding: 4px 12px 8px;
+    padding: 4px 10px max(8px, env(safe-area-inset-bottom));
   }
 
   .composer {
-    padding: 8px 10px 6px;
+    padding: 8px;
+    border-radius: 20px;
   }
 
   /* A long draft must not turn the composer into a third of the phone. */
@@ -745,6 +861,27 @@
   .composer__hint {
     display: none;
   }
+
+  .composer__bar { gap: 4px; }
+  .composer__buttons { gap: 4px; min-width: 0; align-items: center; }
+  .composer__bar .iconBtn,
+  .composer__buttons .btn {
+    flex: none;
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .composer__buttons .composer__send,
+  .composer__buttons .composer__stop {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    gap: 0;
+    font-size: 0;
+  }
+  .composer__buttons #continue { padding: 0 10px; font-size: 12px; }
+  .composer__audio { width: 44px; height: 44px; }
+  .composerRecording .iconBtn { flex: none; width: 44px; height: 44px; }
+  .composerRecording__label { flex: 1; }
 
 }
 
@@ -1617,11 +1754,12 @@
 }
 
 /* -- the public communication of a message (ui/activity.js) ----------------
-   What the agent said between its actions and one compact line of what it did;
-   both stay above the answer. Colours are the chat's tokens only. */
+   Full reasoning panels and the agent's prose alternate above the answer. */
 .msg__activity { display: grid; gap: 10px; margin-bottom: 8px; }
 .msg__activity[hidden] { display: none; }
-.msg__activityMessages { display: grid; gap: 10px; }
+.msg__activityTimeline { display: grid; gap: 10px; }
+.msg__activityExecution { min-width: 0; }
+.msg__activityExecution .reasoning { margin-bottom: 0; }
 .msg__activityMessage { overflow-wrap: anywhere; }
 .msg__activityAuthor {
   display: block; margin-bottom: 1px; color: var(--text-3);
@@ -1631,15 +1769,78 @@
 .msg__activityText { color: var(--text); }
 .msg__activityText > * + * { margin-top: 0.7em; }
 .msg__activityText p { margin: 0; }
-.msg__activityStatus {
-  display: flex; gap: 5px; align-items: baseline; min-width: 0;
-  color: var(--text-3); font-size: 12.5px;
+
+/* -- an interface presented inside an answer (ui/ui-block.js) --------------
+   Part of the answer, not a tool card: it sits under the text, uses the
+   chat's typography and tokens, and shrinks to one column on a phone. */
+.msg__ui { display: grid; gap: 10px; margin-top: 12px; }
+.msg__ui[hidden] { display: none; }
+.uiBlock {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+  padding: 12px;
+  min-width: 0;
 }
-.msg__activityStatus[hidden] { display: none; }
-.msg__activityMark { color: var(--text-3); font-size: 11px; }
-.msg__activityLabel {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.uiBlock__body { display: grid; gap: 10px; min-width: 0; }
+.uiBlock__status { margin: 8px 0 0; color: var(--text-3); font-size: 12px; }
+.uiBlock__status[data-tone="ok"] { color: var(--ok); }
+.uiBlock__status[data-tone="warn"] { color: var(--warn); }
+.uiBlock__status[data-tone="error"] { color: var(--danger); }
+.uiStack { display: grid; gap: 10px; min-width: 0; }
+.uiStack--s { gap: 6px; }
+.uiStack--l { gap: 16px; }
+.uiStack__title { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-2); }
+.uiText { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.uiMetric { display: grid; gap: 2px; }
+.uiMetric__label { color: var(--text-3); font-size: 12px; }
+.uiMetric__value { font-size: 20px; font-weight: 600; color: var(--text); }
+.uiMetric__unit { font-size: 13px; font-weight: 500; color: var(--text-2); }
+.uiMetric__hint { color: var(--text-3); font-size: 12px; }
+.uiField { display: grid; gap: 4px; }
+.uiField__label { color: var(--text-2); font-size: 12px; font-weight: 600; }
+.uiSelect {
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  color: var(--text);
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  min-width: 0;
 }
-.msg__activityCount { flex-shrink: 0; font-variant-numeric: tabular-nums; }
-.msg__activityStatus[data-status="error"] .msg__activityLabel,
-.msg__activityStatus[data-status="error"] .msg__activityMark { color: var(--danger); }
+.uiSelect:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.uiTable { display: grid; gap: 6px; min-width: 0; }
+.uiTable__title { color: var(--text-2); font-size: 12px; font-weight: 600; }
+.uiTable__grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+.uiTable__head {
+  text-align: left; padding: 6px 8px; color: var(--text-3);
+  font-size: 11.5px; font-weight: 600; border-bottom: 1px solid var(--line-strong);
+  white-space: nowrap;
+}
+.uiTable__head.is-end { text-align: right; }
+.uiTable__grid td { padding: 7px 8px; border-bottom: 1px solid var(--line); color: var(--text); }
+.uiTable__grid td.is-end { text-align: right; font-variant-numeric: tabular-nums; }
+.uiTable__grid tr:last-child td { border-bottom: 0; }
+.uiTable__sort {
+  border: 0; background: none; padding: 0; margin: 0;
+  color: inherit; font: inherit; font-weight: 600; cursor: pointer;
+}
+.uiTable__sort:hover { color: var(--text); }
+.uiTable__sort:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+.uiTable__row[role="button"] { cursor: pointer; }
+.uiTable__row[role="button"]:hover { background: var(--bg-2); }
+.uiTable__row.is-selected { background: var(--accent-soft); }
+.uiTable__row[role="button"]:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -1px; }
+.uiTable__check { display: inline-block; width: 16px; color: var(--accent); font-weight: 700; }
+.uiButton { justify-self: start; }
+.uiButton:disabled { opacity: 0.55; cursor: not-allowed; }
+.uiBlock.is-fallback { color: var(--text-2); }
+.uiBlock__text { margin-top: 8px; color: var(--text-3); font-size: 12px; }
+.uiBlock__text summary { cursor: pointer; }
+.uiBlock__fallback {
+  margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  font: inherit; font-family: var(--font); color: var(--text-2);
+}
+.msg__origin { margin: 0 0 6px; color: var(--text-3); font-size: 12px; }

@@ -111,10 +111,12 @@ const RESTORE_FRAMES = 8;
 
 export function createTranscript({
   container, emptyState, jumpButton, onEditMessage, onSpeakMessage, onReportMessage, onContinue, onSwitchVersion,
-  onDeleteMessage, onForkMessage, onContinueInNewChat, onRestoreCheckpoint,
+  onDeleteMessage, onForkMessage, onRetryMessage, onContinueInNewChat, onRestoreCheckpoint, executionMode = "segmented", onExecutionModeToggle = null,
+  onUiSave = null, onUiSubmit = null,
 }) {
   /** Live message handles by id - the speech player reports state by id. */
   const messages = new Map();
+  let workMode = executionMode;
   const scrollFollower = createScrollFollower(container);
   /** >0 while a whole conversation is being built: appending must not scroll. */
   let batching = 0;
@@ -364,7 +366,7 @@ export function createTranscript({
      */
     add(options, { reveal = true } = {}) {
       setEmpty(false);
-      const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage, onRestore: onRestoreCheckpoint });
+      const message = createMessage({ ...options, executionMode: workMode, onExecutionModeToggle, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onRetry: onRetryMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage, onRestore: onRestoreCheckpoint, onUiSave, onUiSubmit });
       messages.set(message.id, message);
       container.append(message.el);
       if (options.role === "assistant" && !options.content) makeAnswerLive(message);
@@ -377,8 +379,18 @@ export function createTranscript({
       return messages.get(id) ?? null;
     },
 
+    /** The handle of a stored message by its id, or null (one in flight has none). */
+    byMessageId(messageId) {
+      return [...messages.values()].find((handle) => handle.messageId === messageId) ?? null;
+    },
+
     setSpeechState(id, state) {
       messages.get(id)?.setSpeechState(state);
+    },
+
+    setExecutionMode(mode) {
+      workMode = mode;
+      for (const handle of messages.values()) handle.setExecutionMode?.(mode);
     },
 
     /**
@@ -423,9 +435,19 @@ export function createTranscript({
             checkpoint: message.checkpoint ?? null,
             // Public typed events of the turn: narration and compact statuses.
             events: message.events ?? [],
+            // A presented interface and where a request came from, both stored
+            // with the message (web_chat/ui_state.py): a reload redraws them.
+            ui: message.ui ?? [],
+            origin: message.origin ?? null,
+            // The turn's ending context size, stored with the answer: a
+            // reload shows the same number the live "done" frame showed.
+            contextTokens: message.context_tokens ?? null,
           });
           handle.reasoning?.hydrate(message.trace, {
             loadStep: loadStep && message.id ? (stepId) => loadStep(message.id, stepId) : null,
+            // The turn's own recorded time: history shows it instead of
+            // re-deriving one from the step intervals it happens to see.
+            durationMs: message.duration_ms ?? null,
           });
           if (message.interruption) {
             handle.setInterrupted(message.interruption, { resumable: message.interruption.resumable });
@@ -492,7 +514,7 @@ export function createTranscript({
       }
       handles.forEach((handle, index) => handle.adopt({
         id: stored[index].id, versions: stored[index].versions, checkpoint: stored[index].checkpoint ?? null,
-        events: stored[index].events ?? [],
+        events: stored[index].events ?? [], contextTokens: stored[index].context_tokens ?? null,
       }));
       return true;
     },
@@ -539,7 +561,7 @@ export function createTranscript({
 
     /** Insert a message just before *anchor* - a message the user sent mid-turn. */
     addBefore(anchor, options) {
-      const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage, onRestore: onRestoreCheckpoint });
+      const message = createMessage({ ...options, onContinueInNewChat, onEdit: onEditMessage, onSpeak: onSpeakMessage, onReport: onReportMessage, onRetry: onRetryMessage, onContinue, onSwitchVersion, onDelete: onDeleteMessage, onFork: onForkMessage, onRestore: onRestoreCheckpoint, onUiSave, onUiSubmit });
       messages.set(message.id, message);
       container.insertBefore(message.el, anchor.el);
       offersContinue();

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from agents import RawResponsesStreamEvent, RunItemStreamEvent
 
 from web_chat.observer import WebStreamObserver
+from web_chat.session import public_activity
 from web_chat.trace import (
     StepKind,
     StepStatus,
@@ -89,6 +90,28 @@ def test_empty_reasoning_step_is_retracted():
     # Whitespace-only thinking is not worth a row; the client is told to drop it.
     assert harness.steps() == []
     assert harness.events[-1]["type"] == "step_removed"
+
+
+def test_nested_observers_keep_their_agent_hierarchy_in_the_public_activity():
+    harness = Harness()
+    child = harness.observer.nested("Agent A", "call-a")
+    grandchild = child.nested("Agent B", "call-b")
+    grandchild.record_commentary("B says")
+    child.record_commentary("A says")
+
+    activity = public_activity(harness.steps())
+
+    contexts = {context["id"]: context for context in activity["contexts"]}
+    agent_a, agent_b = (
+        next(context for context in activity["contexts"] if context["label"] == label)
+        for label in ("Agent A", "Agent B")
+    )
+    assert (contexts["root"]["total"], contexts["root"]["status"]) == (1, "running")
+    assert (agent_a["parent_id"], agent_a["total"]) == ("root", 2)
+    assert (agent_b["parent_id"], agent_b["total"]) == (agent_a["id"], 1)
+    assert [entry["context_id"] for entry in activity["items"]] == [
+        "root", agent_a["id"], agent_b["id"], agent_a["id"],
+    ]
 
 
 def test_tool_call_and_output_collapse_into_one_timed_step():
@@ -580,6 +603,41 @@ def test_usage_accepts_prompt_and_completion_aliases():
     assert harness.recorder.tokens_out == 3
 
 
+def test_last_input_is_the_newest_main_agent_prompt_not_the_turn_sum():
+    harness = Harness()
+    recorder = harness.recorder
+    assert recorder.last_input_tokens == 0
+
+    recorder.record_usage(SimpleNamespace(input_tokens=80, output_tokens=40))
+    recorder.record_usage(SimpleNamespace(input_tokens=2100, output_tokens=20))
+
+    # The turn sums every call; "the context now" is only the latest prompt,
+    # because the earlier prompts are part of it, not added to it.
+    assert recorder.tokens_in == 2180
+    assert recorder.last_input_tokens == 2100
+
+
+def test_a_subagent_call_does_not_replace_the_main_context_size():
+    harness = Harness()
+    recorder = harness.recorder
+    recorder.record_usage(SimpleNamespace(input_tokens=1500, output_tokens=10))
+    # A sub-agent runs in its own context: its prompt says nothing about the
+    # size of the conversation the user is watching.
+    recorder.record_usage(SimpleNamespace(input_tokens=99_999, output_tokens=10), parent_id="agent-1")
+
+    assert recorder.tokens_in == 101_499
+    assert recorder.last_input_tokens == 1500
+
+
+def test_a_call_without_input_tokens_leaves_the_last_size_alone():
+    harness = Harness()
+    recorder = harness.recorder
+    recorder.record_usage(SimpleNamespace(input_tokens=700, output_tokens=5))
+    recorder.record_usage(SimpleNamespace(input_tokens=0, output_tokens=5))
+
+    assert recorder.last_input_tokens == 700
+
+
 def test_missing_usage_is_a_no_op():
     harness = Harness()
     harness.recorder.record_usage(None)
@@ -587,6 +645,7 @@ def test_missing_usage_is_a_no_op():
 
     assert harness.recorder.tokens_in == 0
     assert harness.recorder.tokens_out == 0
+    assert harness.recorder.last_input_tokens == 0
     assert harness.steps() == []
 
 
@@ -788,3 +847,35 @@ def test_a_turn_reads_its_plan_through_a_public_snapshot():
     assert [task["id"] for task in plan["tasks"]] == ["grid-1"]
     # A continued plan starts as this turn's own: it touched nothing yet.
     assert plan["tasks"][0]["turn"] is False
+
+
+def test_a_final_snapshot_freezes_the_interval_of_a_step_still_running():
+    now = [0.0]
+    recorder = TraceRecorder(lambda event: None, clock=lambda: now[0])
+    done = recorder.open(StepKind.TOOL, "Read file")
+    now[0] = 2.0
+    recorder.close(done)
+    running = recorder.open(StepKind.AGENT, "coder")
+    now[0] = 5.0
+
+    # A live snapshot is what the page replays: an open step has no interval yet.
+    live = {step["id"]: step for step in recorder.snapshot()}
+    assert live[running.id]["duration_ms"] is None
+
+    stored = {step["id"]: step for step in recorder.snapshot(final=True)}
+    assert stored[done.id]["duration_ms"] == 2000
+    # Cut off mid-run: the interval is real, the status is not a success.
+    assert stored[running.id]["status"] == StepStatus.RUNNING.value
+    assert stored[running.id]["duration_ms"] == 3000
+
+
+def test_a_final_snapshot_never_turns_a_failed_step_into_a_success():
+    now = [0.0]
+    recorder = TraceRecorder(lambda event: None, clock=lambda: now[0])
+    failed = recorder.open(StepKind.TOOL, "bash_tool")
+    now[0] = 1.0
+    recorder.close(failed, status=StepStatus.ERROR)
+
+    stored = recorder.snapshot(final=True)[0]
+    assert stored["status"] == StepStatus.ERROR.value
+    assert stored["duration_ms"] == 1000

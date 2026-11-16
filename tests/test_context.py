@@ -687,6 +687,69 @@ class TestContextManager:
         assert all(result == "success" for result in results)
 
 
+class TestExecutionTurnId:
+    """A run's turn id is additive: new records keep it, old records read as before."""
+
+    def test_a_new_execution_keeps_its_turn_id_through_a_roundtrip(self):
+        execution = AgentExecution(
+            agent_name="dev",
+            input_message="do it",
+            start_time=10.0,
+            turn_id="turn-1",
+        )
+
+        dumped = execution.model_dump()
+
+        assert dumped["turn_id"] == "turn-1"
+        restored = AgentExecution(**dumped)
+        assert restored.turn_id == "turn-1"
+        assert restored.agent_name == "dev"
+        assert restored.start_time == 10.0
+
+    def test_an_old_record_reads_without_a_turn_id(self):
+        stored = {
+            "agent_name": "dev",
+            "input_message": "do it",
+            "start_time": 10.0,
+            "end_time": 11.0,
+            "output": "done",
+            "error": None,
+            "context_id": "ctx-1",
+            "tools_used": ["read_file"],
+            "token_usage": {"input": 1, "output": 2},
+        }  # no "turn_id" key: written by an older build
+
+        execution = AgentExecution(**stored)
+
+        assert execution.turn_id is None
+        # Storing it again only adds the field; nothing of the old record changes.
+        dumped = execution.model_dump()
+        assert {key: dumped[key] for key in stored} == stored
+
+    def test_a_default_execution_has_no_turn_id(self):
+        execution = AgentExecution(agent_name="dev", input_message="hi", start_time=1.0)
+        assert execution.turn_id is None
+
+    def test_a_sanitized_execution_names_its_turn_only_when_it_has_one(self):
+        cm = ContextManager()
+        context_id = cm.get_current_context_id()
+        cm.add_execution(AgentExecution(
+            agent_name="dev", input_message="with turn", start_time=1.0,
+            end_time=2.0, turn_id="turn-1",
+        ))
+        cm.add_execution(AgentExecution(
+            agent_name="dev", input_message="legacy", start_time=3.0, end_time=4.0,
+        ))
+
+        executions = cm.get_context_executions(context_id)["executions"]
+
+        assert executions[0]["turn_id"] == "turn-1"
+        assert "turn_id" not in executions[1]
+        # More than the join key is still never exposed as such.
+        assert "input_message" not in executions[0]
+        assert "output" not in executions[0]
+
+
 def test_the_sdk_projection_names_its_conversation():
     """A projection never depends on which conversation happens to be active."""
     cm = ContextManager()

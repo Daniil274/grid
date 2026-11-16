@@ -492,6 +492,28 @@ export class ChatController {
   }
 
   /**
+   * Repeat a request: the conversation forks before the message that started
+   * the turn and the same text is sent into the branch, so the answer is built
+   * again from the same point. The request's earlier version stays one click
+   * away in its version switcher. An answer repeats the request behind it.
+   * @param {{id: string, role: string}} target the user's message, or the
+   *   answer whose request is to be repeated
+   */
+  async retryMessage({ id, role }) {
+    const message = this._transcript.byMessageId(id);
+    if (!message) return;
+    // An answer names the request it answers; a user message is its own.
+    const request = role === "user" ? message : this._transcript.requestOf(message);
+    if (!request?.messageId) {
+      // A Continue or a context seed started the turn: there is no request of
+      // the user's to send again, and saying so beats a button that does nothing.
+      if (role !== "user") toast("This answer has no request of its own to repeat.");
+      return;
+    }
+    await this.editMessage({ id: request.messageId, text: request.text, images: request.images });
+  }
+
+  /**
    * Delete a stored message from the chat and from what the agent remembers.
    * A message the user sent takes its whole turn with it - the answer too.
    * @param {{id: string, role: string}} target
@@ -1428,10 +1450,12 @@ export class ChatController {
         turn.failed = true;
         message.setFailed(content);
       }))
-      .on("done", live(({ duration_ms: durationMs, stopped, detached, tokens_in: tokensIn, tokens_out: tokensOut }) => {
+      .on("done", live(({ duration_ms: durationMs, stopped, detached, tokens_in: tokensIn, tokens_out: tokensOut, context_tokens: contextTokens }) => {
         // The turn is over. Only this frame says so: a socket that goes quiet
         // leaves the turn as the server still has it, to be attached again.
         turn.done = true;
+        // The size of the context the turn ended with, beside its actions.
+        message.setContextTokens(contextTokens ?? null);
         if (detached) {
           // The turn finished before we could attach: show what was stored.
           turn.detached = true;

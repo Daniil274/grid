@@ -38,6 +38,40 @@
   max-width: min(30vw, 260px);
 }
 
+/* A name too long for the chip is not written at all (ui/target-picker.js):
+   the glyph alone says where the tools act, the title carries the name. */
+.routeChip.is-compact {
+  gap: 6px;
+  padding-right: 8px;
+}
+
+.routeChip.is-compact .routeChip__text {
+  display: none;
+}
+
+/* The list answers with the same two glyphs as the chip: cloud, screen. */
+.routeOption__head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.routeOption__head .routeOption__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routeOption__icon {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.routeOption.is-active .routeOption__icon {
+  color: var(--accent);
+}
+
 /* -- the target popover --------------------------------------------------- */
 .popover--target {
   width: min(460px, calc(100vw - 32px));
@@ -258,6 +292,18 @@
     position: static;
   }
 
+  /* A phone fits three chips only if each stays within its budget; a name
+     that outgrows its chip turns the chip into its glyph (is-compact), the
+     JS re-running fitName on render and resize. Names stay visible while
+     they fit - the folder's name is what varies most between chats. */
+  .routeChip--target {
+    max-width: min(38vw, 170px);
+  }
+
+  .routeChip--workdir {
+    max-width: min(34vw, 180px);
+  }
+
   /* The folder picker hangs from the whole bar, inside the screen. */
   .popover--target,
   .popover--workdir {
@@ -274,7 +320,7 @@
     overflow: visible;
   }
 
-  /* The chips keep their names: the meta line is what the popover repeats. */
+  /* The meta line is what the popover repeats. */
   .routeChip--target .routeChip__meta,
   .routeChip--workdir .routeChip__meta {
     display: none;

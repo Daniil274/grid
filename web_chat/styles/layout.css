@@ -373,6 +373,24 @@ body.rail-open .scrim {
     position: static;
   }
 
+  /* Every chip is one line tall: the meta lines repeat what the popover
+     shows, and three two-line chips cannot share one bar with a name. */
+  .routeChip__meta {
+    display: none;
+  }
+
+  /* The chosen agent stays whole: the row to the right yields, not the chip -
+     and a name too wide for the whole bar turns the chip into its chevron
+     (js/ui/route-picker.js), the title carrying the name. */
+  .topbar__route {
+    flex-shrink: 0;
+  }
+
+  .topbar__route > .routeChip {
+    flex-shrink: 0;
+    max-width: 40vw;
+  }
+
   .popover,
   .popover--route {
     right: 12px;

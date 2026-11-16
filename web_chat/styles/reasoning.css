@@ -119,6 +119,38 @@
   display: none;
 }
 
+/* A public message said mid-turn (ui/reasoning.js: `showPublicMessages`): it is
+   the turn speaking, not work done, so it reads as one quiet line - the words
+   ellipsised on the row, the answer itself shown in full elsewhere. */
+.step--message {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+.step__message {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 3px 6px 3px 0;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.step--message > .step__message .step__icon {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-3);
+}
+
+.step__messageText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .step__head {
   display: flex;
   gap: 8px;

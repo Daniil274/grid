@@ -358,6 +358,46 @@ function createStepRow(step, load = null) {
 }
 
 /**
+ * A public message said mid-turn, as one line of the trace: the panel is asked
+ * to show it (`showPublicMessages`), but the message itself is read in its own
+ * words elsewhere, so the trace only marks that the turn spoke - the words on a
+ * single ellipsised line, with no payload to open and no clock to read.
+ */
+function createMessageRow(step) {
+  const glyph = h("span.step__icon", {}, icon(ICONS.message, { size: 12 }));
+  const text = h("span.step__messageText");
+  const root = h(
+    "li.step.step--message",
+    { dataset: { kind: "message", status: step.status || "done" } },
+    h("div.step__message", {}, glyph, text),
+  );
+  let latest = step;
+  /** What the line says: the message's own words, its summary when it has none. */
+  const line = (next) => next.body || next.subtitle || next.title || "";
+  const update = (next) => {
+    latest = next;
+    root.dataset.status = next.status || "done";
+    write(text, line(next));
+    // The full sentence stays reachable when the ellipsis cuts it.
+    if (text.title !== line(next)) text.title = line(next);
+  };
+  update(step);
+  return {
+    root,
+    kind: "message",
+    update,
+    /** A message streams like a thought: the line grows as the words arrive. */
+    appendDelta: (delta) => update({ ...latest, body: `${latest.body ?? ""}${delta}` }),
+    settle: () => {},
+    retry: () => {},
+    activity: () => text.textContent,
+    tick() {},
+    mark: () => ({ kind: "message", family: "", status: latest.status }),
+    attention: () => (latest.status === "error" ? "error" : ""),
+  };
+}
+
+/**
  * The rows directly inside one list - the panel's, or a sub-agent block's -
  * and what they add up to: the latest activity for a live headline, the step
  * count for a settled one.
@@ -493,7 +533,15 @@ function createAgentRow(step, turnStart, load = null) {
   const renderFold = (now = Date.now()) => {
     if (current.status === "running") {
       foldLabel.textContent = timeline.activity() || "Working";
-      foldTime.textContent = duration(Math.max(now - turnStart() - (current.at_ms ?? 0), 0));
+      const base = turnStart();
+      // A stored (or detached) block has no live turn to measure from: only
+      // the interval the server froze is known, and an unknown one stays blank.
+      const elapsed = base == null ? null : now - base - (current.at_ms ?? 0);
+      // Before an `attached` frame re-bases the clock, a step that began after
+      // the page's idea of the turn shows no time at all - never a false zero.
+      foldTime.textContent = current.duration_ms != null
+        ? duration(current.duration_ms)
+        : elapsed == null || elapsed < 0 ? "" : duration(elapsed);
       return;
     }
     const count = timeline.size ? ` · ${plural(timeline.size, "step")}` : "";
@@ -577,7 +625,9 @@ function createAgentRow(step, turnStart, load = null) {
     /** Called on the panel's ticker: a running block keeps its clock moving. */
     tick(now) {
       if (current.status !== "running") return;
-      write(timing, duration(Math.max(now - turnStart() - (current.at_ms ?? 0), 0)));
+      const base = turnStart();
+      const elapsed = base == null ? null : now - base - (current.at_ms ?? 0);
+      write(timing, elapsed != null && elapsed >= 0 ? duration(elapsed) : "");
       renderSubtitle();
       timeline.tick(now);
     },
@@ -593,7 +643,7 @@ function createAgentRow(step, turnStart, load = null) {
 /**
  * @returns the panel's element plus the handles the transcript drives it with.
  */
-export function createReasoningPanel() {
+export function createReasoningPanel({ showPublicMessages = false } = {}) {
   const top = createTimeline(h("ol.reasoning__steps"));
   // The plan is a step of the trace, but the reader follows it outside the
   // panel, which folds away once the turn ends (ui/plan-card.js).
@@ -614,7 +664,12 @@ export function createReasoningPanel() {
   const root = h("section.reasoning", { hidden: true, dataset: { state: "idle" } }, toggle, top.list);
 
   let running = false;
-  let startedAt = 0;
+  // The page's clock at the moment this segment began, and at the moment the
+  // turn began. A stored or detached trace has neither: its time is whatever
+  // was recorded, and an unknown time stays unknown rather than counting up
+  // from the epoch.
+  let startedAt = null;
+  let turnStartedAt = null;
   let ticker = null;
   let lastTick = 0;
   let pinnedOpen = false; // the reader opened or closed it; stop auto-managing
@@ -635,7 +690,7 @@ export function createReasoningPanel() {
     if (running) {
       const now = Date.now();
       write(headline, top.activity() || "Thinking");
-      write(timer, duration(now - startedAt));
+      write(timer, startedAt == null ? "" : duration(now - startedAt));
       top.tick(now);
       return;
     }
@@ -687,7 +742,16 @@ export function createReasoningPanel() {
   // row built before the turn knows its chat still finds its record later.
   let stepSource = null;
   const loadFor = () => stepSource?.() ?? stepLoader;
-  const makeRow = (step) => (step.kind === "agent" ? createAgentRow(step, () => startedAt, loadFor) : createStepRow(step, loadFor));
+  // A public message said mid-turn is a line of the trace only when the panel is
+  // asked to show it (the single execution block); the answer's own words show
+  // it everywhere else, so the panel would repeat the same sentence.
+  const isPublicMessage = (step) => showPublicMessages && step.kind === "message";
+  const makeRow = (step) =>
+    step.kind === "agent"
+      ? createAgentRow(step, () => turnStartedAt, loadFor)
+      : isPublicMessage(step)
+        ? createMessageRow(step)
+        : createStepRow(step, loadFor);
 
   return {
     el: root,
@@ -730,9 +794,10 @@ export function createReasoningPanel() {
     },
 
     /** A turn started (or, when reattaching, started `elapsedMs` ago): show it live and open. */
-    start(elapsedMs = 0) {
+    start(elapsedMs = 0, turnElapsedMs = elapsedMs) {
       running = true;
       startedAt = Date.now() - elapsedMs;
+      turnStartedAt = Date.now() - turnElapsedMs;
       totalMs = null;
       totalUsage = null;
       pinnedOpen = false;
@@ -745,6 +810,21 @@ export function createReasoningPanel() {
       ticker = requestTick(tick);
     },
 
+    /**
+     * Re-base the live clocks on the server's own count of the running turn.
+     *
+     * A page that attaches reads the conversation first and the turn's
+     * `attached` frame second; only the frame knows how long the turn has
+     * really run. The segment keeps its own elapsed (`segmentElapsedMs`), its
+     * rows keep measuring from the turn's start.
+     */
+    rebase(segmentElapsedMs = 0, turnElapsedMs = segmentElapsedMs) {
+      if (!running) return;
+      startedAt = Date.now() - Math.max(Number(segmentElapsedMs) || 0, 0);
+      turnStartedAt = Date.now() - Math.max(Number(turnElapsedMs) || 0, 0);
+      renderHeadline();
+    },
+
     /** Create or patch a step, addressed by `step.id`, inside its sub-agent's block. */
     upsert(step) {
       if (step.kind === "plan") {
@@ -753,9 +833,11 @@ export function createReasoningPanel() {
       }
       // A top-level message is public communication, not process: the message
       // shows it in its own words (ui/activity.js), so the panel would be a
-      // second copy of the same sentence. A nested message stays: it is part
-      // of the sub-agent's report and never a message of this turn.
-      if (step.kind === "message" && !step.parent_id) return;
+      // second copy of the same sentence - unless it was built to show public
+      // messages (``showPublicMessages``), where the sentence is one compact line
+      // in its chronological place. A nested message stays: it is part of the
+      // sub-agent's report and never a message of this turn.
+      if (step.kind === "message" && !step.parent_id && !showPublicMessages) return;
       root.hidden = false;
       const existing = index.get(step.id);
       if (existing && (existing.row.kind === "agent") === (step.kind === "agent")) {
@@ -803,7 +885,11 @@ export function createReasoningPanel() {
       running = false;
       if (ticker != null) cancelTick(ticker);
       ticker = null;
-      totalMs = durationMs ?? Date.now() - startedAt;
+      // `undefined` is a live turn settling: its own clock is the truth.
+      // `null` is a stored trace with no recorded time: unknown, never invented.
+      totalMs = durationMs === undefined
+        ? (startedAt == null ? null : Date.now() - startedAt)
+        : durationMs;
       // The server's own count of the turn's tokens, when it said them.
       if (usage && (usage.tokensIn || usage.tokensOut)) totalUsage = usage;
       root.dataset.state = "idle";
@@ -817,7 +903,7 @@ export function createReasoningPanel() {
      * Render a stored trace from a reloaded conversation, collapsed.
      * `loadStep(id)` fetches the whole record of a step stored as ``lazy``.
      */
-    hydrate(steps, { loadStep = null } = {}) {
+    hydrate(steps, { loadStep = null, durationMs = null } = {}) {
       stepLoader = loadStep;
       for (const step of steps ?? []) if (step.kind === "plan") plan.update(step);
       // A stored answer's plan starts folded; the transcript opens the newest.
@@ -830,7 +916,10 @@ export function createReasoningPanel() {
       const ids = new Set(steps.map((step) => step.id));
       const outermost = steps.filter((step) => !step.parent_id || !ids.has(step.parent_id));
       const spent = (key) => outermost.reduce((total, step) => total + (Number(step[key]) || 0), 0);
-      this.finish(Math.max(...steps.map((step) => (step.at_ms ?? 0) + (step.duration_ms ?? 0))), true, {
+      // Only the stored turn's own duration is a total: summing step intervals
+      // is wrong (parallel calls overlap), and without a total the time stays
+      // unknown - the headline then counts steps instead of inventing it.
+      this.finish(durationMs, true, {
         tokensIn: spent("tokens_in"),
         tokensOut: spent("tokens_out"),
       });

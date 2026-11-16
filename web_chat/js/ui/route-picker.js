@@ -15,7 +15,7 @@
  * system, is a complete choice and closes it.
  */
 
-import { h, icon, replace } from "../lib/dom.js";
+import { debounce, h, icon, replace } from "../lib/dom.js";
 import { ICONS } from "./icons.js";
 
 const AUTO = null;
@@ -114,6 +114,13 @@ export function createRoutePicker({ button, nameNode, metaNode, popover, systemL
       metaNode.textContent = state.multiSystem ? "System and agent routed per message" : "Agent routed per message";
     }
     button.dataset.mode = agent ? "agent" : system ? "system" : "auto";
+    // The name follows the target chip's rule: written whole or not at all -
+    // a clipped name names nothing, so the chevron stays a button and the
+    // title carries the name. Measured with the class dropped first: hidden
+    // text measures zero.
+    button.title = nameNode.textContent;
+    button.classList.remove("is-compact");
+    if (nameNode.scrollWidth > nameNode.clientWidth + 1) button.classList.add("is-compact");
   };
 
   const renderSystems = (state) => {
@@ -223,6 +230,10 @@ export function createRoutePicker({ button, nameNode, metaNode, popover, systemL
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && popover.classList.contains("is-open")) close({ restoreFocus: true });
   });
+
+  // A resize can make a name that fitted stop fitting (the chip's max-width
+  // is vw-based in styles/layout.css), and back.
+  window.addEventListener("resize", debounce(() => renderChip(store.get()), 120));
 
   store.watch(["systems", "systemKey", "agentKey", "multiSystem"], (state) => {
     renderChip(state);

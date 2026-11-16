@@ -36,6 +36,8 @@ export function createComposer({
   deliverySelect,
   continueButton,
   attachButton,
+  audioButton = null,
+  tools = null,
   fileInput,
   tray,
   store,
@@ -65,7 +67,12 @@ export function createComposer({
   const syncButtons = ({ streaming, stopping, resumable, restartPending, compacting }) => {
     // While the agent works a message can still be sent: the chosen delivery
     // (or the decision model) says when it reaches the agent.
-    sendButton.hidden = false;
+    const recording = root.classList.contains("is-recording");
+    sendButton.hidden = Boolean(audioButton) && (recording || !hasContent());
+    if (audioButton) {
+      audioButton.hidden = !recording && hasContent();
+      audioButton.disabled = !recording && Boolean(streaming || restartPending || compacting);
+    }
     // Only tie the delivery menu to the streaming state, never to the input's
     // text: toggling it on every keystroke shoved the Send / Stop buttons
     // around while the user typed.
@@ -75,9 +82,10 @@ export function createComposer({
     stopButton.title = stopping
       ? "The agent is finishing its current step - click to stop it right now"
       : "Stop after the current step";
+    stopButton.setAttribute("aria-label", stopping ? "Stop now" : "Stop after the current step");
     sendButton.disabled = restartPending || compacting || pending() || !hasContent();
     continueButton.disabled = Boolean(restartPending || compacting);
-    continueButton.hidden = streaming || !resumable;
+    continueButton.hidden = recording || streaming || !resumable;
     attachButton.disabled = count("image") >= MAX_IMAGES && (!uploads().enabled || count("file") >= uploads().max_files);
     fileInput.setAttribute("accept", uploads().enabled ? "" : ACCEPTED_TYPES.join(","));
     attachButton.title = uploads().enabled ? "Attach files (or paste / drop them)" : "Attach images (or paste / drop them)";
@@ -215,6 +223,29 @@ export function createComposer({
   store.subscribe(syncButtons);
   renderTray();
 
+  if (tools) {
+    const toggle = tools.querySelector("summary");
+    const close = (restoreFocus = false) => {
+      tools.open = false;
+      toggle.setAttribute("aria-expanded", "false");
+      if (restoreFocus) toggle.focus();
+    };
+    tools.addEventListener("toggle", () => toggle.setAttribute("aria-expanded", String(tools.open)));
+    tools.addEventListener("click", (event) => {
+      if (event.target.closest("button")) close();
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (tools.open && !tools.contains(event.target)) close();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (tools.open && event.key === "Escape") {
+        event.preventDefault();
+        close(true);
+      }
+    });
+    input.addEventListener("focus", () => close());
+  }
+
   // Keep the jump-to-latest pill clear of the composer. Its height varies with
   // the multiline input, the attachment and queue trays, and the voice panel,
   // so publish the real height instead of hard-coding a bottom offset in CSS.
@@ -231,6 +262,7 @@ export function createComposer({
   }
 
   return {
+    refresh: sync,
     focus: () => input.focus(),
 
     /** Prefill the composer - prompt chips and "edit message" both land here. */

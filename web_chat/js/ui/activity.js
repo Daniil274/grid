@@ -1,36 +1,25 @@
 /**
- * What the agent said and what it is doing: the public communication of a turn.
+ * The public conversation of a turn and the work between its messages.
  *
- * The server records one typed event per communication (`web_chat/observer.py`):
- * a **message** is what the agent says to people, a **status** is a short line
- * around its words, and a **report** is internal work - thinking, a sub-agent's
- * answer, a tool's output - which never leaves the server. `visibility` is the
- * gate, and this module applies it again: a report cannot be drawn here even if
- * one arrived by mistake.
+ * A top-level agent message closes the execution segment before it. Reasoning,
+ * calls and sub-agent blocks after that message form the next segment. Every
+ * segment is the same full reasoning panel: one implementation, one set of
+ * icons, animations, lazy payloads and disclosure behaviour.
  *
- * The view renders the narration as prose blocks with their author, and the
- * work as a single compact status line. Both survive the actions between them
- * and the final answer: a turn that calls tools no longer loses the sentences
- * it said before each call, and a reconnect redraws the same blocks.
- *
- * The same events arrive from two sources and must not double up:
- *   - **live** - derived from the step frames of the turn, which are exactly
- *     what the stored trace is made of (`eventFromStep`);
- *   - **replay** - the `events` of a stored message (`message.events`).
- * A derived event and its stored twin share the step id, so the step id - not
- * the content or the order - is what dedupes them.
+ * Live frames and stored history take the same path. Stored traces carry the
+ * full steps; typed public events restore their wording and authors, or act as
+ * a fallback for old messages without a trace. Step ids route late updates to
+ * the segment that already owns the step, never to the newest one.
  */
 
 import { h } from "../lib/dom.js";
 import { renderMarkdown } from "../lib/markdown.js";
+import { createReasoningPanel } from "./reasoning.js";
 
 /** The kinds a person may read. A report is internal by contract. */
 export const COMMUNICATION_KINDS = new Set(["message", "status"]);
 
-/**
- * Steps whose title is a status a person may read (`PUBLIC_STATUS_STEP_KINDS`
- * in web_chat/observer.py). Their body is not public.
- */
+/** Steps whose title is a status a person may read (`PUBLIC_STATUS_STEP_KINDS`). */
 export const STATUS_STEP_KINDS = new Set(["prepare", "routing", "tool", "compact", "plan", "handoff", "mcp"]);
 
 /** Authors that are roles, not names: the message itself already says them. */
@@ -41,7 +30,6 @@ export function isPublicCommunication(event) {
   if (!event || typeof event !== "object") return false;
   const kind = String(event.kind ?? "");
   if (!COMMUNICATION_KINDS.has(kind)) return false;
-  // A missing visibility is the wire's public default; "internal" is the gate.
   return String(event.visibility ?? "public") === "public";
 }
 
@@ -61,14 +49,7 @@ function statusText(step) {
   return subtitle && !title.includes(subtitle) ? `${title} · ${subtitle}` : title;
 }
 
-/**
- * The public event a live step frame stands for, or null for a silent step.
- *
- * Mirrors `event_from_step` in web_chat/observer.py: a top-level `message` step
- * is public narration; a top-level tool/prepare/... step is a public status
- * carrying its title only. A step inside a sub-agent block (`parent_id`) is
- * internal work, never a message of this turn.
- */
+/** The public communication a top-level step represents, or null when silent. */
 export function eventFromStep(step) {
   if (!step || typeof step !== "object") return null;
   if (step.parent_id) return null;
@@ -82,7 +63,7 @@ export function eventFromStep(step) {
   };
   if (kind === "message") {
     const content = String(step.body ?? "") || String(step.subtitle ?? "");
-    return content ? { ...base, kind: "message", content } : null;
+    return content ? { ...base, kind: "message", content, _complete: true } : null;
   }
   if (kind === "error") {
     const content = String(step.body ?? "") || String(step.title ?? "");
@@ -95,15 +76,18 @@ export function eventFromStep(step) {
   return null;
 }
 
-/** Every public event of a list, once, in the order it first arrived. */
+/** Every public event once: first position, latest status and wording. */
 export function publicCommunications(events) {
-  const seen = new Set();
+  const seen = new Map();
   const list = [];
   for (const event of events ?? []) {
     if (!isPublicCommunication(event)) continue;
     const key = communicationKey(event);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(key)) {
+      list[seen.get(key)] = event;
+      continue;
+    }
+    seen.set(key, list.length);
     list.push(event);
   }
   return list;
@@ -116,97 +100,285 @@ function authorOf(event, fallback) {
   return fallback || "";
 }
 
+/** An old event-only history still opens in the full execution component. */
+function stepFromStatus(event) {
+  return {
+    id: String(event.step_id ?? event.id ?? communicationKey(event)),
+    kind: "tool",
+    title: String(event.content ?? ""),
+    status: String(event.status ?? "done"),
+    subtitle: "",
+    detail: "",
+    body: "",
+    refs: [],
+    at_ms: event.at_ms ?? 0,
+    duration_ms: null,
+    tone: "neutral",
+    policy: null,
+    parent_id: event.parent_id ?? null,
+  };
+}
+
+function stepFromMessage(event) {
+  const content = String(event.content ?? "");
+  return { ...stepFromStatus(event), kind: "message", title: content, body: content };
+}
+
 /**
- * The activity section of one assistant message.
- *
- * @returns the element the message inserts above its answer, plus the handles
- *   the live turn, a stored conversation and a reconnect drive it with.
+ * The alternating message/execution stream of one assistant answer. The
+ * returned object is both the activity view and the reasoning controller the
+ * chat drives, so a step can never be drawn in two parallel representations.
  */
-export function createActivityView() {
-  const messages = h("div.msg__activityMessages");
-  const label = h("span.msg__activityLabel");
-  const count = h("span.msg__activityCount");
-  const status = h(
-    "div.msg__activityStatus",
-    { hidden: true },
-    h("span.msg__activityMark", { "aria-hidden": "true", text: "›" }),
-    label,
-    count,
-  );
-  const el = h(
-    "section.msg__activity",
-    { hidden: true, "aria-label": "Agent activity" },
-    messages,
-    status,
-  );
+export function createActivityView({ mode = "segmented" } = {}) {
+  const timeline = h("div.msg__activityTimeline");
+  const el = h("section.msg__activity", { hidden: true, "aria-label": "Agent activity" }, timeline);
 
-  /** Message blocks by identity: the node and what it currently says. */
   const blocks = new Map();
-  /** The statuses in the order they happened, by identity. */
-  const statuses = new Map();
-  const statusOrder = [];
+  const modelSteps = new Map();
+  const modelEvents = new Map();
+  const executions = [];
+  const stepPanels = new Map();
+  const realSteps = new Set();
+  const publicChildSteps = new Set();
+  const publicChildEvents = new Map();
+  let currentExecution = null;
+  let planExecution = null;
   let fallbackAuthor = "";
+  let replayEvents = [];
+  let viewMode = mode === "combined" ? "combined" : "segmented";
+  let liveRunning = false;
+  let stepSource = null;
+  let storedLoader = null;
+  // When the turn itself began, on the page's clock. Every live segment counts
+  // its rows from the turn's start, never from the moment the segment opened.
+  let turnStartedAt = null;
+  // Where the segment being built began, in turn-relative milliseconds: 0 for
+  // the first one, else the `at_ms` of the message that closed the previous
+  // segment. Together with the next boundary (or the turn's own total) it is
+  // the exact segment interval - no sum of step durations, whose parallel
+  // calls overlap.
+  let boundaryAt = 0;
 
-  const refresh = () => {
-    const hasMessages = messages.childNodes.length > 0;
-    const hasStatus = statusOrder.length > 0;
-    el.hidden = !hasMessages && !hasStatus;
-    status.hidden = !hasStatus;
+  /** How long the live turn has run, or null when no live turn is measured. */
+  const turnElapsed = () => (turnStartedAt == null ? null : Math.max(Date.now() - turnStartedAt, 0));
+
+  /** A stored step's `at_ms` as a turn-relative boundary, or null when unknown. */
+  const numberAt = (value) => {
+    const at = Number(value);
+    return Number.isFinite(at) && at >= 0 ? at : null;
   };
 
-  const paintStatus = () => {
-    const latest = statuses.get(statusOrder.at(-1));
-    label.textContent = latest ? latest.content : "";
-    count.textContent = statuses.size > 1 ? `${statuses.size} steps` : "";
-    status.dataset.status = latest?.status ?? "";
-    status.title = statusOrder.map((key) => statuses.get(key).content).join("\n");
+  const refresh = () => {
+    const active = liveRunning && currentExecution;
+    const hasWork = executions.some((entry) => !entry.panel.isEmpty || entry.panel.hasPlan);
+    el.hidden = !active && blocks.size === 0 && !hasWork;
+  };
+
+  /** Tokens of the segment's outermost rows; children stay inside their block. */
+  const segmentUsage = (entry) => {
+    const steps = [...entry.steps.values()];
+    const ids = new Set(steps.map((step) => step.id));
+    const outermost = steps.filter((step) => !step.parent_id || !ids.has(step.parent_id));
+    return {
+      tokensIn: outermost.reduce((total, step) => total + (Number(step.tokens_in) || 0), 0),
+      tokensOut: outermost.reduce((total, step) => total + (Number(step.tokens_out) || 0), 0),
+    };
+  };
+
+  /**
+   * Close exactly the segment before a message, or the last one at turn end.
+   *
+   * Its duration is the distance between boundaries: `endAt` is the `at_ms` of
+   * the message that ends it, or `durationMs` is the turn's own total and the
+   * segment ends with the turn. With neither, the interval is unknown and the
+   * panel shows no made-up number (a live panel without a `done` falls back to
+   * its own clock, which measures from the same boundary).
+   */
+  const closeExecution = ({ durationMs = null, endAt = null, autoCollapse = true, usage = null } = {}) => {
+    const entry = currentExecution;
+    if (!entry) return;
+    currentExecution = null;
+    // An empty segment is not a segment: narration can arrive before any work,
+    // and the panel it would draw contains nothing to time.
+    if (entry.panel.isEmpty && !entry.panel.hasPlan) {
+      entry.panel.finish(0, false);  // stop its clock; it never had work to show
+      entry.container.remove();
+      const index = executions.indexOf(entry);
+      if (index >= 0) executions.splice(index, 1);
+      refresh();
+      return;
+    }
+    const startAt = entry.startAt ?? 0;
+    // A boundary that lies before a step it should end is not a timing this
+    // trace can be trusted for (a legacy step without `at_ms` reads as 0):
+    // the interval then stays unknown rather than becoming a false zero.
+    const latestStepAt = [...entry.steps.values()].reduce(
+      (latest, step) => Math.max(latest, Number(step.at_ms) || 0), startAt,
+    );
+    const exact = durationMs != null && Number(durationMs) >= startAt
+      ? Number(durationMs) - startAt
+      : endAt != null && endAt >= latestStepAt
+        ? endAt - startAt
+        : undefined;
+    entry.panel.finish(
+      exact,
+      autoCollapse,
+      usage ?? segmentUsage(entry),
+    );
+    if (!entry.live) entry.panel.setPlanCollapsed(true);
     refresh();
   };
 
-  const addMessage = (event) => {
+  /** Start a segment only at the point the stream reaches it. */
+  const ensureExecution = (elapsedMs = 0, turnElapsedMs = null) => {
+    if (currentExecution) return currentExecution;
+    const panel = createReasoningPanel({ showPublicMessages: viewMode === "combined" });
+    if (storedLoader) panel.setStepSource(() => storedLoader);
+    else if (stepSource) panel.setStepSource(stepSource);
+    const container = h("div.msg__activityExecution", {}, panel.el, panel.planEl);
+    const elapsedTurn = turnElapsedMs ?? turnElapsed() ?? elapsedMs;
+    const entry = {
+      panel, container, steps: new Map(), live: liveRunning,
+      // The segment's own boundary, and how far the turn had run when it opened
+      // (the panel's clock measures from the boundary, not from zero).
+      startAt: boundaryAt ?? 0,
+    };
+    executions.push(entry);
+    currentExecution = entry;
+    timeline.append(container);
+    if (entry.live) panel.start(Math.max(elapsedTurn - entry.startAt, 0), elapsedTurn);
+    refresh();
+    return entry;
+  };
+
+  /**
+   * One public message, and the boundary it draws in the turn's timeline.
+   *
+   * `atKnown` says whether `at_ms` is a real trace timing: only a stored or
+   * streamed step carries one. An event-only replay has no timing to trust, so
+   * it never invents a boundary (nor a segment interval).
+   */
+  const addMessage = (event, { atKnown = false } = {}) => {
     const key = communicationKey(event);
     const content = String(event.content ?? "");
-    if (!content) return;
-    // An event names its author when it can; otherwise the message's own agent
-    // is the fallback, and it must follow routing (`setAuthor`).
+    if (!content) return false;
     const own = authorOf(event, "");
     const author = own || fallbackAuthor;
+    const at = atKnown && !event.parent_id ? numberAt(event.at_ms) : null;
     const known = blocks.get(key);
     if (known) {
-      if (known.content !== content) {
+      // The trace carries full prose; a typed event may be capped by the wire.
+      if (known.content !== content && (event._complete || !known.complete)) {
         known.content = content;
         known.text.innerHTML = renderMarkdown(content);
       }
+      known.complete ||= Boolean(event._complete);
       if (own && known.author !== own) {
         known.own = own;
         known.author = own;
         known.authorNode.textContent = own;
         known.authorNode.hidden = false;
       }
-      return;
+      // The same message arrived earlier as a typed event; its step frame now
+      // supplies the real boundary, if it is the newest one.
+      if (at != null && at >= boundaryAt && !currentExecution) boundaryAt = at;
+      return true;
     }
+
+    // Only a top-level utterance ends a segment. A child's public commentary
+    // must not detach later child steps from their sub-agent's trace block.
+    if (!event.parent_id) closeExecution({ endAt: at });
+    if (at != null) boundaryAt = at;
     const authorNode = h("span.msg__activityAuthor", { text: author });
     authorNode.hidden = !author;
     const text = h("div.msg__activityText", { html: renderMarkdown(content) });
     const node = h("div.msg__activityMessage", { dataset: { kind: "message" } }, authorNode, text);
-    blocks.set(key, { el: node, text, authorNode, content, author, own });
-    messages.append(node);
+    blocks.set(key, { el: node, text, authorNode, content, author, own, complete: Boolean(event._complete) });
+    timeline.append(node);
     refresh();
+    return true;
+  };
+
+  /** Add a real trace step, or an event-only fallback when `synthetic` is set. */
+  const addExecutionStep = (step, { synthetic = false } = {}) => {
+    if (!step || typeof step !== "object" || !step.id) return false;
+    const id = String(step.id);
+    modelSteps.set(id, step);
+    if (!synthetic) realSteps.add(id);
+    if (viewMode === "combined") {
+      const entry = stepPanels.get(id) ?? stepPanels.get(step.parent_id) ?? ensureExecution(0, turnElapsed());
+      entry.steps.set(id, step);
+      stepPanels.set(id, entry);
+      if (step.kind === "plan") planExecution = entry;
+      entry.panel.upsert(step);
+      refresh();
+      return true;
+    }
+    if (step.kind === "message" && step.parent_id && publicChildSteps.has(id)) {
+      const stored = publicChildEvents.get(id);
+      const content = String(step.body ?? "") || String(step.subtitle ?? "") || String(stored?.content ?? "");
+      return addMessage({ ...stored, kind: "message", step_id: id, parent_id: step.parent_id, content, _complete: true });
+    }
+    if (step.kind === "message" && !step.parent_id) {
+      const event = eventFromStep(step);
+      return event ? addMessage(event, { atKnown: !synthetic }) : false;
+    }
+    // A late frame belongs to its original segment; a new child belongs with
+    // its parent even if the public conversation has since moved on.
+    const isPlan = step.kind === "plan";
+    const entry = stepPanels.get(id)
+      ?? (isPlan ? planExecution : null)
+      ?? stepPanels.get(step.parent_id)
+      ?? ensureExecution(0, turnElapsed());
+    if (isPlan) planExecution = entry;
+    entry.steps.set(id, step);
+    stepPanels.set(id, entry);
+    entry.panel.upsert(step);
+    refresh();
+    return true;
   };
 
   const addStatus = (event) => {
-    const key = communicationKey(event);
-    const content = String(event.content ?? "");
-    if (!content) return;
-    const known = statuses.get(key);
-    if (known) {
-      known.content = content;
-      known.status = String(event.status ?? known.status);
-    } else {
-      statuses.set(key, { content, status: String(event.status ?? "done") });
-      statusOrder.push(key);
+    const id = String(event.step_id ?? event.id ?? communicationKey(event));
+    // The full trace wins: a compact replay must never erase its payload.
+    if (realSteps.has(id)) return true;
+    return addExecutionStep(stepFromStatus(event), { synthetic: true });
+  };
+
+  const addPublicMessage = (event) => {
+    if (viewMode === "combined") {
+      const id = String(event.step_id);
+      if (realSteps.has(id)) return true;
+      return addExecutionStep(stepFromMessage(event), { synthetic: true });
     }
-    paintStatus();
+    if (event.parent_id && event.step_id) {
+      const id = String(event.step_id);
+      publicChildSteps.add(id);
+      publicChildEvents.set(id, event);
+      // Explicit public commentary belongs to the conversation, not to a
+      // second copy inside the sub-agent's execution report.
+      const entry = stepPanels.get(id);
+      if (entry) {
+        entry.panel.remove(id);
+        entry.steps.delete(id);
+        stepPanels.delete(id);
+      }
+    }
+    return addMessage(event);
+  };
+
+  const resetView = () => {
+    for (const entry of executions) entry.panel.finish(0, false);
+    blocks.clear();
+    executions.length = 0;
+    stepPanels.clear();
+    realSteps.clear();
+    publicChildSteps.clear();
+    publicChildEvents.clear();
+    currentExecution = null;
+    planExecution = null;
+    boundaryAt = 0;
+    timeline.replaceChildren();
   };
 
   refresh();
@@ -214,67 +386,211 @@ export function createActivityView() {
   return {
     el,
 
-    /** How many narration blocks are on screen. */
     get size() {
       return blocks.size;
     },
 
-    /** The newest status, as the compact line says it. */
-    get statusText() {
-      return label.textContent;
+    get isEmpty() {
+      return executions.every((entry) => entry.panel.isEmpty && !entry.panel.hasPlan);
     },
 
-    get statusCount() {
-      return statuses.size;
+    get hasPlan() {
+      return executions.some((entry) => entry.panel.hasPlan);
     },
 
-    /** Record one event; false when it is internal or silent. */
+    get mode() {
+      return viewMode;
+    },
+
+    /** Record one public event; false when it is internal or the final answer. */
     add(event) {
       if (!isPublicCommunication(event)) return false;
       if (event.kind === "message") {
-        // The answer itself is the message's body: only what came before it is
-        // a block here, or the answer would be drawn twice.
         if (!event.step_id) return false;
-        addMessage(event);
-        return true;
+        modelEvents.set(communicationKey(event), event);
+        return addPublicMessage(event);
       }
-      addStatus(event);
-      return true;
+      modelEvents.set(communicationKey(event), event);
+      return addStatus(event);
     },
 
-    /** Record a stored message's `events` (a reload, a reconcile, an adopt). */
+    /** Record stored events; hydrate uses this same replay with the full trace. */
     apply(events) {
-      for (const event of events ?? []) this.add(event);
+      replayEvents = [...(events ?? [])];
+      for (const event of replayEvents) this.add(event);
+      if (!liveRunning) closeExecution();
       return this;
     },
 
-    /** Record what a live step frame says; null for a silent step. */
+    /** A top-level message step is prose; work arrives through `upsert`. */
     observeStep(step) {
       const event = eventFromStep(step);
-      return event ? this.add(event) : false;
+      return event?.kind === "message" ? addExecutionStep(step) : false;
+    },
+
+    /** The live reasoning controller: one panel per execution segment. */
+    start(elapsedMs = 0) {
+      storedLoader = null;
+      liveRunning = true;
+      turnStartedAt = Date.now() - Math.max(Number(elapsedMs) || 0, 0);
+      boundaryAt = 0;
+      ensureExecution(elapsedMs);
     },
 
     /**
-     * The agent running this turn, once routing knows it. Narration that came
-     * without an author of its own takes this name, before and after routing.
+     * The server's own count of the running turn (the `attached` frame).
+     *
+     * The history read that precedes an attach is older than the attach; only
+     * this frame says how long the turn has really run, so the live clocks are
+     * re-based on it. The segment keeps its own offset from the turn's start.
      */
+    setElapsed(elapsedMs) {
+      const elapsed = Number(elapsedMs);
+      if (!Number.isFinite(elapsed) || elapsed < 0) return;
+      turnStartedAt = Date.now() - elapsed;
+      if (liveRunning && currentExecution) {
+        currentExecution.panel.rebase(
+          Math.max(elapsed - (currentExecution.startAt ?? 0), 0), elapsed,
+        );
+      }
+    },
+
+    upsert(step) {
+      return addExecutionStep(step);
+    },
+
+    remove(id) {
+      const key = String(id);
+      modelSteps.delete(key);
+      modelEvents.delete(`message:step:${key}`);
+      modelEvents.delete(`status:step:${key}`);
+      const entry = stepPanels.get(key);
+      if (!entry) return;
+      entry.panel.remove(key);
+      entry.steps.delete(key);
+      stepPanels.delete(key);
+      realSteps.delete(key);
+      refresh();
+    },
+
+    appendReasoning(id, delta) {
+      const key = String(id);
+      const known = modelSteps.get(key);
+      if (known) modelSteps.set(key, { ...known, body: String(known.body ?? "") + delta });
+      stepPanels.get(key)?.panel.appendReasoning(id, delta);
+    },
+
+    finish(durationMs, autoCollapse = true, usage = null) {
+      // The server reports the whole turn. Each segment ends at its own next
+      // boundary; this total closes the last one, and only a single panel
+      // keeps the turn's tokens.
+      const single = executions.length === 1;
+      closeExecution({ durationMs, autoCollapse, usage: single ? usage : null });
+      liveRunning = false;
+      refresh();
+    },
+
+    setStepSource(source) {
+      stepSource = source;
+      for (const entry of executions) entry.panel.setStepSource(source);
+    },
+
+    setPlanCollapsed(collapsed) {
+      for (const entry of executions) entry.panel.setPlanCollapsed(collapsed);
+    },
+
+    applyStoredPlan(stored) {
+      (planExecution ?? ensureExecution(0, turnElapsed())).panel.applyStoredPlan(stored);
+      refresh();
+    },
+
+    /** Switch representation of the same steps, including the running turn. */
+    setMode(next) {
+      if (!["segmented", "combined"].includes(next) || next === viewMode) return this;
+      viewMode = next;
+      const trace = [...modelSteps.values()];
+      replayEvents = [...modelEvents.values()];
+      this.hydrate(trace, { loadStep: storedLoader, keepRunning: liveRunning });
+      return this;
+    },
+
+    /** Rebuild a stored stream in one chronological order, with lazy payloads. */
+    hydrate(steps, { loadStep = null, keepRunning = false, durationMs = null } = {}) {
+      const resume = keepRunning && liveRunning;
+      storedLoader = loadStep;
+      liveRunning = resume;
+      if (!resume) {
+        turnStartedAt = null;
+        boundaryAt = 0;
+      }
+      const trace = [...(steps ?? [])];
+      const events = publicCommunications(replayEvents);
+      resetView();
+      modelSteps.clear();
+      modelEvents.clear();
+      for (const step of trace) modelSteps.set(String(step.id), step);
+      for (const event of events) modelEvents.set(communicationKey(event), event);
+      const traceIds = new Set(trace.map((step) => String(step.id)));
+      const topMessages = new Set(trace.filter((step) => step.kind === "message" && !step.parent_id).map((step) => String(step.id)));
+      const storedMessages = new Map(events
+        .filter((event) => event.kind === "message" && topMessages.has(String(event.step_id)))
+        .map((event) => [String(event.step_id), event]));
+      const items = trace.map((step, order) => ({ step, at_ms: step.at_ms ?? 0, order }));
+      let order = items.length;
+      for (const event of events) {
+        if (event.kind === "message") {
+          if (!event.step_id || topMessages.has(String(event.step_id))) continue;
+        } else if (traceIds.has(String(event.step_id ?? event.id))) continue;
+        items.push({ event, at_ms: event.at_ms ?? 0, order: order++ });
+      }
+      items.sort((a, b) => (Number(a.at_ms) || 0) - (Number(b.at_ms) || 0) || a.order - b.order);
+
+      for (const item of items) {
+        if (item.event) {
+          this.add(item.event);
+          continue;
+        }
+        const step = item.step;
+        if (viewMode === "combined") addExecutionStep(step);
+        else if (step.kind === "message" && !step.parent_id) {
+          const derived = eventFromStep(step);
+          const stored = storedMessages.get(String(step.id));
+          if (derived && stored) {
+            addMessage(
+              { ...derived, ...stored, kind: "message", step_id: step.id, content: derived.content, _complete: true },
+              { atKnown: true },
+            );
+          } else if (derived) addMessage(derived, { atKnown: true });
+          else if (stored) addMessage(stored);
+        } else addExecutionStep(step);
+      }
+      // Every segment before a message already ended at that message's boundary;
+      // the turn's own recorded total closes the last one (unknown when absent).
+      if (!resume) closeExecution({ durationMs });
+      refresh();
+    },
+
     setAuthor(name) {
       fallbackAuthor = String(name ?? "");
       for (const block of blocks.values()) {
         if (block.own) continue;
-        const author = fallbackAuthor;
-        block.authorNode.textContent = author;
-        block.authorNode.hidden = !author;
+        block.author = fallbackAuthor;
+        block.authorNode.textContent = fallbackAuthor;
+        block.authorNode.hidden = !fallbackAuthor;
       }
       return this;
     },
 
     clear() {
-      blocks.clear();
-      statuses.clear();
-      statusOrder.length = 0;
-      messages.replaceChildren();
-      paintStatus();
+      replayEvents = [];
+      modelSteps.clear();
+      modelEvents.clear();
+      storedLoader = null;
+      liveRunning = false;
+      turnStartedAt = null;
+      boundaryAt = 0;
+      resetView();
+      refresh();
       return this;
     },
   };

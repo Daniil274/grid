@@ -315,6 +315,10 @@ class TraceRecorder:
         self._pending_usage: dict[Optional[str], tuple[int, int, bool]] = {}
         self._tokens_in = 0
         self._tokens_out = 0
+        # The prompt size of the turn's latest model call of the main agent -
+        # what the model actually saw when it last ran. Sub-agent calls live in
+        # their own contexts and do not describe this conversation's context.
+        self._last_input = 0
 
     @property
     def elapsed_ms(self) -> int:
@@ -329,6 +333,15 @@ class TraceRecorder:
     def tokens_out(self) -> int:
         """The turn's completion tokens so far."""
         return self._tokens_out
+
+    @property
+    def last_input_tokens(self) -> int:
+        """The prompt tokens of the turn's latest main-agent model call.
+
+        The size of the context that call saw, unlike :attr:`tokens_in`, which
+        sums every call of the turn. 0 until a call reports usage.
+        """
+        return self._last_input
 
     # -- step lifecycle ----------------------------------------------------
     def open(self, kind: StepKind, title: str, **fields: Any) -> Step:
@@ -404,6 +417,10 @@ class TraceRecorder:
         tokens_out = int(field_of(usage, "output_tokens", "completion_tokens") or 0)
         if not tokens_in and not tokens_out:
             return
+        if parent_id is None and tokens_in > 0:
+            # The newest prompt of the main conversation: it supersedes the
+            # earlier one instead of adding to it (they overlap).
+            self._last_input = tokens_in
         self._tokens_in += tokens_in
         self._tokens_out += tokens_out
         if self._on_usage is not None:
@@ -454,9 +471,25 @@ class TraceRecorder:
             self.end_reasoning(parent_id=parent_id)
 
     # -- persistence -------------------------------------------------------
-    def snapshot(self) -> list[dict[str, Any]]:
-        """The turn's timeline, for storing alongside the assistant message."""
-        return [step.as_dict() for step in self._steps.values()]
+    def snapshot(self, *, final: bool = False) -> list[dict[str, Any]]:
+        """The turn's timeline, for storing alongside the assistant message.
+
+        ``final`` is the snapshot taken when the turn is over. A step still
+        ``running`` can never finish now, so the time it already spent is the
+        truth the stored trace must keep - otherwise every reader would guess
+        it from wall clocks. Its status stays ``running``: the step did not
+        succeed, only its interval is frozen.
+        """
+        if not final:
+            return [step.as_dict() for step in self._steps.values()]
+        now = self.elapsed_ms
+        stored: list[dict[str, Any]] = []
+        for step in self._steps.values():
+            record = step.as_dict()
+            if step.status is StepStatus.RUNNING:
+                record["duration_ms"] = max(now - step.at_ms, 0)
+            stored.append(record)
+        return stored
 
     def step_record(self, step_id: str) -> Optional[dict[str, Any]]:
         """One step with everything it holds, or None: what a lazy frame left out."""

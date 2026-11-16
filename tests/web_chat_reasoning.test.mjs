@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { installFakeDom } from "./fake_dom.mjs";
 import { createReasoningPanel } from "../web_chat/js/ui/reasoning.js";
+import { ICONS } from "../web_chat/js/ui/icons.js";
 
 installFakeDom();
 
@@ -37,7 +38,7 @@ test("a sub-agent's steps nest in its block, not in the caller's timeline", () =
     step("s3", { title: "bash_tool", parent_id: "s2" }),
     step("s4", { title: "read_file", parent_id: "s2" }),
     step("s5", { title: "git.diff" }),
-  ]);
+  ], { durationMs: 5_000 });
 
   const top = topList(panel);
   assert.deepEqual(titles(top), ["Thinking", "coder", "git.diff"]);
@@ -545,4 +546,113 @@ test("a failed tool row's fold row says it failed; thinking has none", () => {
   const [tool, thinking] = rows(topList(panel));
   assert.match(tool.find("step__foldLabel").textContent, /^Failed after /);
   assert.equal(thinking.find("step__fold"), null);
+});
+
+test("a public message stays out of the trace unless the panel shows them", () => {
+  const panel = createReasoningPanel();
+  panel.upsert(step("s1", { title: "read_file" }));
+  panel.upsert(step("m1", { kind: "message", title: "Looking", body: "Reading the config." }));
+  panel.upsert(step("s2", { title: "git.diff" }));
+
+  assert.deepEqual(titles(topList(panel)), ["read_file", "git.diff"]);
+});
+
+test("with showPublicMessages a public message is one compact line in its place", () => {
+  const panel = createReasoningPanel({ showPublicMessages: true });
+  panel.upsert(step("s1", { title: "read_file" }));
+  panel.upsert(step("m1", { kind: "message", title: "Looking", body: "Reading the config." }));
+  panel.upsert(step("s2", { title: "git.diff" }));
+
+  const list = topList(panel);
+  assert.equal(rows(list).length, 3);
+  const message = rows(list)[1];
+  assert.ok(message.classList.contains("step--message"));
+  // The message speaks for itself: body as the line, the icon, and nothing
+  // to open - no prose, no payloads, no head button, no clock.
+  assert.equal(message.find("step__messageText").textContent, "Reading the config.");
+  assert.equal(message.find("step__messageText").title, "Reading the config.");
+  assert.equal(message.find("step__prose"), null);
+  assert.equal(message.find("step__head"), null);
+  assert.equal(message.find("step__timing"), null);
+  assert.equal(message.find("payload__label"), null);
+  assert.equal(message.find("icon").querySelector("path").getAttribute("d"), ICONS.message);
+
+  // The server re-sending the message updates the line in place.
+  panel.upsert(step("m1", { kind: "message", body: "Read it: all good." }));
+  assert.equal(rows(list).length, 3);
+  assert.equal(message.find("step__messageText").textContent, "Read it: all good.");
+
+  // A nested message is compact too, but stays inside its sub-agent block.
+  panel.upsert(step("a1", { kind: "agent", title: "coder" }));
+  panel.upsert(step("m2", { kind: "message", title: "Note", body: "Fixed.", parent_id: "a1" }));
+  const block = rows(list).at(-1);
+  const nested = rows(agentList(block))[0];
+  assert.equal(nested.find("step__messageText").textContent, "Fixed.");
+  assert.equal(nested.find("step__title"), null);
+});
+
+test("a stored block still running gets no clock invented from the epoch", () => {
+  const panel = createReasoningPanel();
+  const stored = () => [
+    step("a", { kind: "agent", title: "coder", status: "running", at_ms: 20_000, duration_ms: null }),
+    step("s", { title: "read_file", parent_id: "a", status: "running", at_ms: 21_000, duration_ms: null }),
+  ];
+
+  panel.hydrate(stored());
+  const block = rows(topList(panel))[0];
+  assert.equal(block.find("step__foldTime").textContent, "", "unknown time stays blank");
+
+  // The same trace read again (a second reload) says exactly the same thing.
+  panel.hydrate(stored());
+  assert.equal(rows(topList(panel))[0].find("step__foldTime").textContent, "");
+  assert.equal(panel.el.find("reasoning__headline").textContent, "1 step");
+});
+
+test("a block frozen while running keeps its recorded interval and its status", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([
+    step("a", { kind: "agent", title: "coder", status: "running", at_ms: 20_000, duration_ms: 60_000 }),
+  ]);
+
+  const row = rows(topList(panel))[0];
+  assert.equal(row.dataset.status, "running", "a step cut off mid-run was not a success");
+  assert.equal(row.find("step__foldTime").textContent, "1m");
+});
+
+test("a stored turn shows the duration it recorded, not a sum of its steps", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([step("s1", { at_ms: 0, duration_ms: 10_000 })], { durationMs: 30_000 });
+
+  assert.equal(panel.el.find("reasoning__headline").textContent, "Worked for 30s");
+  assert.equal(panel.el.find("reasoning__timer").textContent, "· 1 step");
+});
+
+test("a stored trace with no recorded time counts steps instead of inventing one", () => {
+  const panel = createReasoningPanel();
+  panel.hydrate([step("t", { title: "read_file", at_ms: 20_000, duration_ms: null })]);
+
+  assert.equal(panel.el.find("reasoning__headline").textContent, "1 step");
+  assert.equal(panel.el.find("reasoning__timer").textContent, "");
+});
+
+test("a reattached panel measures its rows from the turn's start", () => {
+  const panel = createReasoningPanel();
+  panel.start(80_000, 80_000); // the page attached 80 s into the turn
+  panel.upsert(step("a", { kind: "agent", title: "coder", status: "running", at_ms: 40_000, duration_ms: null }));
+
+  const row = rows(topList(panel))[0];
+  assert.equal(row.find("step__foldTime").textContent, "40s");
+  panel.finish(80_000);
+});
+
+test("the attached frame re-bases the live clock on the server's elapsed", () => {
+  const panel = createReasoningPanel();
+  panel.start(10_000, 10_000);
+  panel.upsert(step("a", { kind: "agent", title: "coder", status: "running", at_ms: 5_000, duration_ms: null }));
+
+  panel.rebase(40_000, 40_000);
+
+  assert.equal(panel.el.find("reasoning__timer").textContent, "40s");
+  assert.equal(rows(topList(panel))[0].find("step__foldTime").textContent, "35s");
+  panel.finish(40_000);
 });
