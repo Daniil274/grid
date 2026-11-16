@@ -191,3 +191,8 @@ voice-*.log
 
 # Local binaries
 *.exe
+
+# Local map/beads research prototypes: throwaway clones, venvs and test dumps
+# that are not part of the repository.
+/.map-*/
+/.map-discovery.py
