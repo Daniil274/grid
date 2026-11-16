@@ -41,7 +41,8 @@ def admin_client(tmp_path):
     store = AccountStore(tmp_path / "accounts.db")
     accounts = Accounts(store)
     accounts.create_user("admin", PASSWORD, role="admin")
-    server = WebChatServer(Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None)
+    server = WebChatServer(Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None,
+                           trusted_hosts=("testserver",))
     client = TestClient(server.app, headers=SAME_SITE)
     response = client.post("/api/auth/login", json={"username": "admin", "password": PASSWORD})
     assert response.status_code == 200, response.text

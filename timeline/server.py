@@ -91,7 +91,15 @@ class WSManager:
 def create_app(
     db_path: str | Path | None = None,
     factory: Optional[Any] = None,
+    trusted_hosts: Iterable[str] = (),
 ) -> FastAPI:
+    """The timeline dashboard.
+
+    *trusted_hosts* are the ``Host`` names this tool answers to besides loopback
+    names; by default it answers loopback names only, which is where it binds.
+    Published under another name (a proxy, a tunnel), that name must be given
+    here - the Host check is never skipped (web_chat.security.same_site_only).
+    """
     from core.tracing.tracer import get_tracer, ExecutionTracer
 
     tracer: ExecutionTracer = get_tracer(db_path) if db_path else get_tracer()
@@ -122,7 +130,7 @@ def create_app(
         title="Agent Timeline",
         docs_url=None,
         redoc_url=None,
-        dependencies=[Depends(same_site_only())],
+        dependencies=[Depends(same_site_only(trusted_hosts=trusted_hosts))],
         lifespan=lifespan,
     )
 

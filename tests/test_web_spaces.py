@@ -182,7 +182,7 @@ def two_user_server():
 
     pool = SpacePool(FakeSpace)
     deployment = SimpleNamespace(voice_source=lambda: ("voice.yaml", None), voice_config_dict=lambda: {})
-    return WebChatServer(deployment, pool, identify=identify, warm_user=None)
+    return WebChatServer(deployment, pool, identify=identify, warm_user=None, trusted_hosts=("testserver",))
 
 
 def test_conversations_of_one_user_are_invisible_to_another():
@@ -224,6 +224,7 @@ def test_a_request_without_a_user_is_refused(path):
         SpacePool(FakeSpace),
         identify=nobody,
         warm_user=None,
+        trusted_hosts=("testserver",),
     )
 
     assert TestClient(server.app, headers=SAME_SITE).get(path).status_code == 401

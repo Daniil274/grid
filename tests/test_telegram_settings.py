@@ -364,6 +364,7 @@ def test_a_cross_site_request_cannot_set_the_token(tmp_path):
         SpacePool(lambda user_id: _DummySpace()),
         telegram_path=tmp_path / "telegram.db",
         warm_user=None,
+        trusted_hosts=("testserver",),
     )
     with TestClient(server.app) as client:  # no Origin, no Sec-Fetch-Site
         refused = client.put(

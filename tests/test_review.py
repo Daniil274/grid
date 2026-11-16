@@ -284,7 +284,7 @@ def test_a_user_files_a_review_from_their_chat_and_sees_it(tmp_path, space):
     answer = space.say("assistant", "hello", agent="coder")
     server = WebChatServer(
         SimpleNamespace(voice_enabled=lambda: False), SpacePool(lambda user_id: space), identify=_alice,
-        warm_user=None, reviews=_desk(tmp_path),
+        warm_user=None, reviews=_desk(tmp_path), trusted_hosts=("testserver",),
     )
     client = TestClient(server.app, headers=SAME_SITE)
 
@@ -315,7 +315,7 @@ def _clients(tmp_path, space, **policy):
 
     server = WebChatServer(
         SimpleNamespace(voice_enabled=lambda: False), SpacePool(lambda user_id: space), identify=identify,
-        warm_user=None, reviews=_desk(tmp_path, **policy),
+        warm_user=None, reviews=_desk(tmp_path, **policy), trusted_hosts=("testserver",),
     )
     return (
         TestClient(server.app, headers={**SAME_SITE, "X-User": ALICE.id}),
@@ -383,7 +383,7 @@ def test_the_review_page_is_there_only_with_reviews(tmp_path, space):
     def page(reviews):
         server = WebChatServer(
             SimpleNamespace(voice_enabled=lambda: False), SpacePool(lambda user_id: space), identify=_alice,
-            warm_user=None, reviews=reviews,
+            warm_user=None, reviews=reviews, trusted_hosts=("testserver",),
         )
         return TestClient(server.app).get("/admin/review", follow_redirects=False)
 

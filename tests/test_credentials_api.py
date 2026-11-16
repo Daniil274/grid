@@ -46,8 +46,8 @@ def parts(accounts, monkeypatch):
     vault = Vault(accounts.store, Cipher([Cipher.new_key()]))
     usage = UsageStore()
     server = WebChatServer(
-        Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None, vault=vault, usage=usage
-    )
+        Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None, vault=vault, usage=usage,
+        trusted_hosts=("testserver",))
     return server, vault, usage, verified
 
 
@@ -104,7 +104,8 @@ def test_a_key_can_be_removed_and_checks_are_rate_limited(parts, accounts):
 
 def test_without_a_secrets_key_the_server_says_so(accounts):
     vault = Vault(accounts.store, None)
-    server = WebChatServer(Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None, vault=vault)
+    server = WebChatServer(Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None, vault=vault,
+                           trusted_hosts=("testserver",))
     accounts.create_user("bob", PASSWORD, tier="byok")
     client = signed_in(server, "bob")
     assert client.get("/api/plan").json()["vault_enabled"] is False
@@ -227,3 +228,104 @@ async def test_a_plan_without_the_model_is_not_a_rejected_key():
     with pytest.raises(credentials_api.KeyUnusable) as refused:
         await credentials_api.verify_key("kimi-code", "good", httpx.MockTransport(planless))
     assert refused.value.code == "plan_lacks_model"
+
+
+# -- a provider's error body may be any valid JSON, not only {"error": {...}} ---
+
+#: The real verifier, kept from before any fixture replaces the module's name.
+PRISTINE_VERIFY_KEY = credentials_api.verify_key
+
+
+@pytest.mark.parametrize(("body", "kind", "message"), [
+    # The documented shape, unchanged.
+    ({"error": {"type": "model_not_found", "message": "no such model"}}, "model_not_found", "no such model"),
+    # A numeric code where text is expected, a machine-readable code only.
+    ({"error": {"code": 402, "message": None}}, "402", ""),
+    ({"error": {"message": "plain refusal"}}, "", "plain refusal"),
+    # A plain string instead of an object.
+    ({"error": " insufficient balance "}, "", "insufficient balance"),
+    # No error at all; the reason may sit at the top level.
+    ({"error": None}, "", ""),
+    ({"message": "top level reason"}, "", "top level reason"),
+])
+def test_an_error_body_is_read_for_what_it_says(body, kind, message):
+    """Every shape is read, and a field of the wrong type is rendered, not fatal."""
+    parsed_kind, parsed_message = credentials_api._error_of(httpx.Response(400, json=body))
+    assert (parsed_kind, parsed_message) == (kind, message)
+
+
+@pytest.mark.parametrize("body", [["rate limited"], "boom", {"error": ["a", "b"]}, {"error": 7}])
+def test_a_body_with_no_readable_error_field_falls_back_to_its_text(body):
+    """An unreadable error still leaves the provider's words in the body."""
+    kind, message = credentials_api._error_of(httpx.Response(400, json=body))
+    assert kind == ""
+    assert message  # the body's own text, never empty and never a crash
+
+
+@pytest.mark.parametrize("body", [
+    ["rate limited"],
+    "boom",
+    {"error": None},
+    {"error": 7},
+    {"error": {"code": 429, "message": None}},
+    {"error": {"type": 500, "message": 502}},
+])
+@pytest.mark.asyncio
+async def test_an_odd_error_body_is_a_typed_refusal_not_a_crash(body):
+    """Verification may refuse; it may not raise AttributeError/TypeError."""
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(400, json=body)
+
+    with pytest.raises((ConnectionError, credentials_api.KeyUnusable, credentials_api.KeyRejected)):
+        await credentials_api.verify_key("kimi-code", "good-key-123456", httpx.MockTransport(handler))
+
+
+@pytest.mark.asyncio
+async def test_a_string_error_field_still_classifies_the_refusal():
+    """A one-line reason is enough to say the account cannot pay."""
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(400, json={"error": "Your account has insufficient balance"})
+
+    with pytest.raises(credentials_api.KeyUnusable) as refused:
+        await credentials_api.verify_key("kimi-code", "good-key-123456", httpx.MockTransport(handler))
+    assert refused.value.code == "quota_exceeded"
+    assert "insufficient balance" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_named_in_plain_text_still_saves_the_key():
+    """429 means "try later": the key is fine, whatever shape its body has."""
+    def handler(request):
+        return httpx.Response(429, json={"error": "rate limit exceeded"})
+
+    await credentials_api.verify_key("kimi-code", "good-key-123456", httpx.MockTransport(handler))
+
+
+@pytest.mark.asyncio
+async def test_an_odd_provider_body_is_a_typed_response_not_a_server_error(parts, accounts, monkeypatch):  # noqa: F811
+    """The route must answer 402, not 500, and must store nothing - nor echo the key."""
+    server, vault, _usage, _verified = parts
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(400, json=["rate limited"])
+
+    async def verify(kind, secret):
+        await PRISTINE_VERIFY_KEY(kind, secret, httpx.MockTransport(handler))
+
+    monkeypatch.setattr(credentials_api, "verify_key", verify)
+    user = accounts.create_user("bob", PASSWORD, tier="byok")
+    client = signed_in(server, "bob")
+    response = client.put("/api/credentials/kimi-code", json={"secret": "good-key-123456"})
+
+    # A body we cannot read is still the provider's refusal of the request:
+    # typed (402 bad_request), never a 500 from an AttributeError.
+    assert response.status_code == 402
+    assert response.json()["code"] == "bad_request"
+    assert "good-key-123456" not in response.text
+    assert not vault.has(user.id, "kimi-code")

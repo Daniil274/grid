@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any, Callable, Optional
 
 import httpx
@@ -126,14 +127,46 @@ async def verify_key(
         raise ConnectionError(f"Could not reach {LABELS[kind]} to check the key: {type(exc).__name__}.") from exc
 
 
+def _text_of(value: Any) -> str:
+    """A provider's field as text: a string as it is, anything else rendered."""
+    if value is None:
+        return ""
+    return value.strip() if isinstance(value, str) else str(value)
+
+
 def _error_of(response: httpx.Response) -> tuple[str, str]:
-    """The provider's error ``type``/``code`` and its message, as far as it gives them."""
+    """The provider's error ``type``/``code`` and its message, as far as it gives them.
+
+    A provider may answer with something other than the documented
+    ``{"error": {"type": ..., "message": ...}}``: a bare list, a plain string,
+    ``"error": null``, or numbers where text is expected. None of those may
+    crash the check or hide why the key was refused, so every shape is read for
+    what it says and an unreadable body falls back to its own (truncated) text.
+    """
     try:
-        error = (response.json() or {}).get("error") or {}
+        payload = response.json()
     except ValueError:
         return "", response.text[:300]
-    kind = str(error.get("type") or error.get("code") or "")
-    return kind, str(error.get("message") or "")
+    if not isinstance(payload, Mapping):
+        # Valid JSON that is not an object (a list, a bare string): only its
+        # text can be read, exactly as for a body that is not JSON at all.
+        return "", response.text[:300]
+    error = payload.get("error")
+    if isinstance(error, Mapping):
+        kind = _text_of(error.get("type")) or _text_of(error.get("code"))
+        message = _text_of(error.get("message"))
+        if not message:
+            message = _text_of(error.get("detail")) or _text_of(error.get("error"))
+        return kind, message
+    if isinstance(error, str):
+        return "", error.strip()
+    if error is None:
+        # Some gateways put the reason at the top level instead.
+        kind = _text_of(payload.get("type")) or _text_of(payload.get("code"))
+        return kind, _text_of(payload.get("message"))
+    # An error of any other shape (a list of them, a number): its words are
+    # still in the body, which is all a refusal needs to be classified.
+    return "", response.text[:300]
 
 
 def _refusal(kind: str, response: httpx.Response, model: Optional[str] = None) -> None:

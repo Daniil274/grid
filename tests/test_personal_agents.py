@@ -206,7 +206,8 @@ def two_user_client(deployment):
         name = connection.headers["X-Test-User"]
         return User(id=name, username=name, role="user")
 
-    server = WebChatServer(deployment, SpacePool(lambda user_id: space_of(deployment, user_id)), identify=identify, warm_user=None)
+    server = WebChatServer(deployment, SpacePool(lambda user_id: space_of(deployment, user_id)), identify=identify,
+                           warm_user=None, trusted_hosts=("testserver",))
     return TestClient(server.app, headers=SAME_SITE)
 
 

@@ -65,7 +65,7 @@ def test_api_endpoints(temp_dir):
     path = temp_dir / "context.json"
     context_id = _seed(path)
     app = create_app(context_path=path)
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://localhost")
 
     root = client.get("/")
     assert root.status_code == 200
@@ -117,6 +117,6 @@ def test_api_endpoints(temp_dir):
     assert missing.status_code == 404
 
     assert client.post("/api/reload", headers={"Origin": "https://evil.example"}).status_code == 403
-    reloaded = client.post("/api/reload", headers={"Origin": "http://testserver"})
+    reloaded = client.post("/api/reload", headers={"Origin": "http://localhost"})
     assert reloaded.status_code == 200
     assert reloaded.json()["ok"] is True

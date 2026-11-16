@@ -12,15 +12,17 @@ services:
     depends_on:
       searxng:
         condition: service_healthy
-    # This host only: without --accounts the chat has no sign-in, and its agents
-    # run commands. Reach it through an SSH tunnel, or put the server with
-    # accounts behind HTTPS (README, "Сайт для нескольких пользователей").
+    # This host only: --unsafe-single-user is the explicit one-user mode with no
+    # sign-in, and its agents run commands. Reach it through an SSH tunnel. A
+    # site for several users runs --accounts behind HTTPS, not this service
+    # (README, "Сайт для нескольких пользователей"; docs/security.md).
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - ${GRID_WORKSPACE:-.}:/workspace
     command:
       - grid-web-chat
+      - --unsafe-single-user
       - --routing
       - /app/routing.yaml
       - --path
@@ -61,6 +63,7 @@ services:
       - >-
         grid-workshop init /workspace/grid &&
         exec grid-web-chat
+        --unsafe-single-user
         --config /workspace/grid/examples/system-admin/config.yaml
         --path /workspace/grid --host 0.0.0.0 --port 8000
 

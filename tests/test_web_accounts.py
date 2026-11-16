@@ -36,7 +36,8 @@ def accounts(tmp_path):
 
 @pytest.fixture
 def server(accounts):
-    return WebChatServer(Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None)
+    return WebChatServer(Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None,
+                         trusted_hosts=("testserver",))
 
 
 @pytest.fixture
@@ -240,8 +241,9 @@ def test_another_site_cannot_act_with_the_users_cookie(server, accounts):
 
 
 class Connection:
-    def __init__(self, method="POST", kind="http", **headers):
+    def __init__(self, method="POST", kind="http", host="chat.local:8000", **headers):
         self.scope = {"type": kind, "method": method}
+        headers.setdefault("host", host)
         self.headers = {key.replace("_", "-"): value for key, value in headers.items()}
 
 
@@ -262,7 +264,7 @@ class Connection:
     ],
 )
 def test_the_origin_guard(connection, allowed):
-    guard = OriginGuard(["https://chat.example.com/"])
+    guard = OriginGuard(["https://chat.example.com/"], trusted_hosts=("chat.local:8000",))
 
     assert guard.allows(connection) is allowed
 
@@ -293,7 +295,7 @@ def test_admins_review_the_actions_of_every_users_agents(accounts):
     alice = accounts.create_user("alice", PASSWORD)
     spaces = {}
     pool = SpacePool(lambda user_id: spaces.setdefault(user_id, ReviewingSpace(user_id)))
-    server = WebChatServer(Deployment(), pool, auth=SessionAuth(accounts), warm_user=None)
+    server = WebChatServer(Deployment(), pool, auth=SessionAuth(accounts), warm_user=None, trusted_hosts=("testserver",))
     alice_client = signed_in(server, "alice")
     alice_client.get("/api/chat/conversations")  # alice's space is loaded
     root = signed_in(server, "root")
@@ -324,7 +326,7 @@ def test_a_space_whose_container_cannot_start_is_refused(accounts):
         raise IsolationUnavailable("The workspace container could not be started.")
 
     accounts.create_user("alice", PASSWORD)
-    server = WebChatServer(Deployment(), SpacePool(build), auth=SessionAuth(accounts), warm_user=None)
+    server = WebChatServer(Deployment(), SpacePool(build), auth=SessionAuth(accounts), warm_user=None, trusted_hosts=("testserver",))
     alice = signed_in(server, "alice")
 
     refused = alice.get("/api/chat/conversations")
@@ -342,7 +344,8 @@ def test_only_signed_in_admins_get_the_review_page(accounts, tmp_path):
     from web_chat.review.store import ReviewStore
 
     desk = ReviewDesk(ReviewStore(tmp_path / "reviews"), ReviewPolicy)
-    server = WebChatServer(Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None, reviews=desk)
+    server = WebChatServer(Deployment(), SpacePool(FakeSpace), auth=SessionAuth(accounts), warm_user=None, reviews=desk,
+                           trusted_hosts=("testserver",))
     accounts.create_user("alice", PASSWORD)
     accounts.create_user("boss", PASSWORD, role="admin")
 

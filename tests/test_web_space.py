@@ -205,13 +205,16 @@ def _registry(*, agents: dict[str, str], hang: bool = False) -> SystemRegistry:
         config=SimpleNamespace(
             agents={
                 key: SimpleNamespace(
-                    routable=True, description=description, name=description
+                    routable=True, description=description, name=description,
+                    tools=[],
                 )
                 for key, description in agents.items()
-            }
+            },
+            tools={},
         ),
         config_path=Path("solo.yaml"),
         get_default_agent=lambda: next(iter(agents)),
+        missing_system_skills=lambda key: [],
         project_tools_loader=None,
     )
 

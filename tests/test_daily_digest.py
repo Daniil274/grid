@@ -438,7 +438,7 @@ def test_real_context_schema_and_server_wiring(tmp_path):
 
     deployment = SimpleNamespace(voice_source=lambda: ("voice.yaml", None), voice_config_dict=dict)
     server = WebChatServer(deployment, SpacePool(ServerSpace), identify=identify,
-                           warm_user=None, lazy_path=tmp_path / "lazy.db")
+                           warm_user=None, lazy_path=tmp_path / "lazy.db", trusted_hosts=("testserver",))
     assert server.digest is not None
     assert (tmp_path / "daily-digest.db").exists()
     with TestClient(server.app) as client:

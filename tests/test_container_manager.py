@@ -5,7 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 from core.managers import container_manager as module
-from core.managers.container_manager import CONTAINER_WORKDIR, PROFILE_LABEL, ContainerManager, container_name
+from core.managers.container_manager import (
+    CONTAINER_WORKDIR,
+    PROFILE_LABEL,
+    ContainerManager,
+    container_name,
+    tenant_network_name,
+)
 from schemas.schemas import IsolationConfig
 
 
@@ -14,12 +20,16 @@ CURRENT_BUILD = "sha256:current"
 
 
 class FakeContainer:
-    def __init__(self, name, source, labels, status="running", image=CURRENT_BUILD):
+    def __init__(self, name, source, labels, status="running", image=CURRENT_BUILD, network=None):
         self.name, self.id, self.status = name, f"id-{name}", status
         self.attrs = {
             "Mounts": [{"Destination": CONTAINER_WORKDIR, "Source": source}],
             "Config": {"Labels": labels},
             "Image": image,
+            # Docker always reports the network a container was made on; None
+            # here means a container of a daemon that does not say, as real
+            # Docker never does.
+            "HostConfig": {"NetworkMode": network} if network is not None else {},
         }
         self.removed = False
         self.started = False
@@ -35,12 +45,54 @@ class FakeContainer:
         self.stopped = True
 
 
+class FakeNetwork:
+    """A Docker network as docker-py reports it: name, labels, attached containers."""
+
+    def __init__(self, name, driver=None, labels=None, options=None):
+        self.name = name
+        self.driver = driver
+        self.options = options
+        self.attrs = {"Name": name, "Labels": dict(labels or {}), "Containers": {}}
+        self.removed = False
+
+    def remove(self):
+        self.removed = True
+
+
+class FakeNetworks:
+    """The network API of the Docker client (client.networks), as docker-py has it."""
+
+    def __init__(self):
+        self.items = {}
+
+    def list(self, names=None, filters=None):
+        found = list(self.items.values())
+        if names is not None:
+            found = [network for network in found if network.name in names]
+        for key, expected in (filters or {}).items():
+            assert key == "label", f"unexpected network filter {key!r}"
+            label, _, value = expected.partition("=")
+            found = [n for n in found if (n.attrs.get("Labels") or {}).get(label) == value]
+        return found
+
+    def create(self, name, driver=None, labels=None, options=None):
+        network = FakeNetwork(name, driver, labels, options)
+        self.items[name] = network
+        return network
+
+    def get(self, name):
+        if name not in self.items:
+            raise module.NotFound("missing")
+        return self.items[name]
+
+
 class FakeClient:
     def __init__(self):
         self.existing = {}
         self.runs = []
         self.probes = []
         self.containers = self
+        self.networks = FakeNetworks()
         self.images = SimpleNamespace(get=lambda name: SimpleNamespace(id=CURRENT_BUILD))
 
     def get(self, name_or_id):
@@ -54,7 +106,9 @@ class FakeClient:
             self.probes.append((image, command, kwargs))
             return b"1000\n1000\n"
         self.runs.append((image, kwargs))
-        container = FakeContainer(kwargs["name"], next(iter(kwargs["volumes"])), kwargs["labels"])
+        container = FakeContainer(
+            kwargs["name"], next(iter(kwargs["volumes"])), kwargs["labels"], network=kwargs.get("network")
+        )
         self.existing[container.name] = container
         return container
 
@@ -120,7 +174,7 @@ def test_a_container_made_with_other_settings_is_recreated(manager, tmp_path):
     manager, client = manager
     source = str(tmp_path.resolve())
     name = container_name("u1", tmp_path.resolve())
-    old = client.existing[name] = FakeContainer(name, source, labels={})
+    old = client.existing[name] = FakeContainer(name, source, labels={}, network="host")
 
     manager.get_or_create_container("u1", workspace=tmp_path)
 
@@ -129,10 +183,17 @@ def test_a_container_made_with_other_settings_is_recreated(manager, tmp_path):
 
 def test_a_current_container_is_reused_and_started(manager, tmp_path):
     manager, client = manager
+    # A reusable container must have an inspectable tenant network, not just
+    # a NetworkMode string claiming one exists.
+    assert manager._ensure_tenant_network("u1") == tenant_network_name("u1")
     source = str(tmp_path.resolve())
     name = container_name("u1", tmp_path.resolve())
     current = client.existing[name] = FakeContainer(
-        name, source, labels={PROFILE_LABEL: manager.profile}, status="exited"
+        name,
+        source,
+        labels={PROFILE_LABEL: manager.profile},
+        status="exited",
+        network=tenant_network_name("u1"),
     )
 
     assert manager.get_or_create_container("u1", workspace=tmp_path) is current
@@ -156,7 +217,11 @@ def test_a_container_of_an_older_image_build_is_recreated(manager, tmp_path):
     source = str(tmp_path.resolve())
     name = container_name("u1", tmp_path.resolve())
     old = client.existing[name] = FakeContainer(
-        name, source, labels={PROFILE_LABEL: manager.profile}, image="sha256:older"
+        name,
+        source,
+        labels={PROFILE_LABEL: manager.profile},
+        image="sha256:older",
+        network=tenant_network_name("u1"),
     )
 
     manager.get_or_create_container("u1", workspace=tmp_path)

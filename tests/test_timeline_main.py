@@ -36,7 +36,7 @@ def test_timeline_cli_help_exits_zero():
 
 
 def test_create_app_without_factory():
-    client = TestClient(create_app())
+    client = TestClient(create_app(), base_url="http://localhost")
     response = client.get("/api/traces")
     assert response.status_code == 200
     assert "traces" in response.json()

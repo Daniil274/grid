@@ -52,9 +52,12 @@ RUN ln -s /usr/local/lib/node_modules/@colbymchenry/codegraph/npm-shim.js /usr/l
 
 WORKDIR /app
 COPY . /app
+# /data is where the accounts server keeps its state (CMD below); it belongs to
+# the unprivileged user the server runs as. A mounted volume or host directory
+# over it must be writable by that uid 1000 (README, "Запуск в контейнере").
 RUN --mount=type=cache,target=/root/.cache/pip python -m pip install . \
-    && mkdir -p /config /workspace \
-    && chown -R grid:grid /config /workspace
+    && mkdir -p /config /data /workspace \
+    && chown -R grid:grid /config /data /workspace
 
 USER grid
 WORKDIR /workspace
@@ -64,4 +67,15 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"
 
-CMD ["grid-web-chat", "--routing", "/app/routing.yaml", "--path", "/workspace", "--host", "0.0.0.0", "--port", "8000"]
+# Secure by default: a site where users sign in, each with a space of their own,
+# and no implicit admin for whoever reaches the port open by `docker run -p`.
+# Every connection must authenticate, so listening on all interfaces is what a
+# published port is for. With --accounts every user's agents run in a container
+# of their own, which needs a Docker backend: without one the server refuses to
+# start (fail closed) instead of running commands on this machine. The image
+# never mounts a Docker socket by itself - reaching a daemon is a deployment
+# decision with its own risks (docs/security.md).
+#
+# For one local user with no sign-in, pass --unsafe-single-user explicitly and
+# publish the port on loopback only; see README, "Запуск в контейнере".
+CMD ["grid-web-chat", "--accounts", "--data-dir", "/data", "--routing", "/app/routing.yaml", "--host", "0.0.0.0", "--port", "8000"]

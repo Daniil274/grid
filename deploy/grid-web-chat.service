@@ -10,6 +10,12 @@
 #
 # Install the two slices next to this unit first:
 #   install -m 644 deploy/grid-server.slice deploy/grid-users.slice /etc/systemd/system/
+#
+# --allowed-origin names the public address the shipped deploy/Caddyfile
+# serves (chat.example.com). Caddy forwards that Host; the server answers it
+# only because it is listed here. Change both files together when the site
+# gets a real name: a name Caddy forwards but this unit does not list gets
+# 400 before any page, login or socket.
 
 [Unit]
 Description=Grid web chat (accounts)
@@ -32,6 +38,7 @@ Environment=GRID_CGROUP_PARENT=grid-users.slice
 ExecStart=/opt/grid/.venv/bin/grid-web-chat --accounts \
     --routing deploy/routing.yaml \
     --data-dir /var/lib/grid-web \
+    --allowed-origin https://chat.example.com \
     --host 127.0.0.1 --port 8000 \
     --secure-cookies
 Restart=on-failure

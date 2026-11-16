@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -49,6 +49,7 @@ def _resolve_dashboard_html() -> Path:
 def create_app(
     context_path: str | Path | None = None,
     context_manager: Optional[Any] = None,
+    trusted_hosts: Iterable[str] = (),
 ) -> FastAPI:
     """
     Create the FastAPI inspector.
@@ -69,7 +70,8 @@ def create_app(
     # Local tools, reachable by every page the operator's browser opens: a
     # change (rerun, edit, reload) must come from their own page.
     app = FastAPI(
-        title="Context Inspector", docs_url=None, redoc_url=None, dependencies=[Depends(same_site_only())]
+        title="Context Inspector", docs_url=None, redoc_url=None,
+        dependencies=[Depends(same_site_only(trusted_hosts=trusted_hosts))],
     )
 
     def _manager():

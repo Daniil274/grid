@@ -121,7 +121,8 @@ def client(spaces):
         return User(id=name, username=name, role="user")
 
     deployment = SimpleNamespace(voice_source=lambda: ("voice.yaml", None), voice_config_dict=dict)
-    server = WebChatServer(deployment, SpacePool(spaces), identify=identify, warm_user=None)
+    server = WebChatServer(deployment, SpacePool(spaces), identify=identify, warm_user=None,
+                           trusted_hosts=("testserver",))
     with TestClient(server.app, headers=SAME_SITE) as test_client:
         yield test_client
 

@@ -275,7 +275,8 @@ def server_client(tmp_path, role="admin", enabled=True):
         return User(id="test", username="test", role=role)
 
     server = WebChatServer(SimpleNamespace(), SpacePool(FakeSpace), identify=identify, warm_user=None,
-                           restart_path=tmp_path / "restart.json", restart_callback=Mock() if enabled else None)
+                           restart_path=tmp_path / "restart.json", restart_callback=Mock() if enabled else None,
+                           trusted_hosts=("testserver",))
     return server, TestClient(server.app, headers=SAME_SITE)
 
 

@@ -176,11 +176,12 @@ def _server(space=None) -> WebChatServer:
         _DummyDeployment(),
         SpacePool(lambda user_id: space),
         action_review_token="operator-token",
+        trusted_hosts=("testserver",),
     )
 
 
 def test_timeline_index_serves_dashboard_html():
-    client = TestClient(create_timeline_app())
+    client = TestClient(create_timeline_app(trusted_hosts=("testserver",)))
 
     response = client.get("/")
 
@@ -282,7 +283,8 @@ async def test_bootstrap_survives_optional_tool_system_exit(tmp_path, sample_con
 
 
 def test_a_single_user_server_closes_its_voice_when_it_stops():
-    server = WebChatServer(_DummyDeployment(), SpacePool(lambda user_id: _DummySpace()), warm_user=None)
+    server = WebChatServer(_DummyDeployment(), SpacePool(lambda user_id: _DummySpace()), warm_user=None,
+                           trusted_hosts=("testserver",))
 
     with TestClient(server.app, headers=SAME_SITE):
         assert server.voice is not None and not server.voice._closed
@@ -377,7 +379,7 @@ def test_web_chat_deletes_a_conversation_but_not_a_running_one():
 def test_the_timeline_takes_changes_only_from_its_own_page():
     from starlette.websockets import WebSocketDisconnect
 
-    client = TestClient(create_timeline_app())
+    client = TestClient(create_timeline_app(trusted_hosts=("testserver",)))
     rerun = "/api/traces/t/nodes/n/rerun"
 
     assert client.post(rerun, json={"messages": []}, headers={"Origin": "https://evil.example"}).status_code == 403

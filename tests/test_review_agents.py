@@ -285,7 +285,7 @@ def test_admins_start_an_analysis_and_follow_it(tmp_path):
         desk = ReviewDesk(store, ReviewPolicy, agents=agents_or_none)
         server = WebChatServer(
             SimpleNamespace(voice_enabled=lambda: False), SpacePool(lambda user_id: None), identify=identify,
-            warm_user=None, reviews=desk,
+            warm_user=None, reviews=desk, trusted_hosts=("testserver",),
         )
         return TestClient(server.app, headers={"Origin": "http://testserver"})
 

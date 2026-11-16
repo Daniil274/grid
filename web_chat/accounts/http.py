@@ -27,7 +27,7 @@ password takes tens of milliseconds of CPU, so it runs in a worker thread.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Collection, Literal, Optional
+from typing import Any, Awaitable, Callable, Collection, Literal, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -36,7 +36,7 @@ from starlette.requests import HTTPConnection
 
 from web_chat.accounts.limits import AttemptLimiter
 from web_chat.accounts.passwords import MAX_LENGTH, WeakPassword
-from web_chat.accounts.service import SESSION_MAX_AGE, AccountError, Accounts, SignInFailed
+from web_chat.accounts.service import SESSION_MAX_AGE, AccountError, Accounts, SessionRevoked, SignInFailed
 from web_chat.identity import Role, User, admins_only
 from web_chat.security import OriginGuard, refusal
 
@@ -132,6 +132,24 @@ class SessionAuth:
         self.accounts.purge_expired_sessions()
         self._per_account.prune()
         self._per_address.prune()
+
+    def revalidator(self, connection: HTTPConnection) -> Callable[[], Awaitable[User]]:
+        """A callable that asks again whether *connection* is still signed in.
+
+        A websocket is identified once, at its handshake, but it can stay open
+        for days. This reads the same cookie again on every call, so a session
+        ended by sign-out, expiry, disabling the account or a role/password
+        change stops the socket. Raises :class:`SessionRevoked` when the
+        cookie opens no session (or a disabled account).
+        """
+
+        async def authorize() -> User:
+            user = self.user_of(connection)
+            if user is None:
+                raise SessionRevoked("The session ended")
+            return user
+
+        return authorize
 
     # -- cookie ----------------------------------------------------------------------
     def _set_cookie(self, request: Request, response: Response, token: str) -> None:

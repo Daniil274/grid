@@ -587,6 +587,7 @@ def web_client(tmp_path):
         SpacePool(build),
         identify=identify,
         warm_user=None,
+        trusted_hosts=("testserver",),
     )
     return TestClient(server.app, headers={"Origin": "http://testserver"}), spaces
 
@@ -952,6 +953,7 @@ def real_web_client(space):
         SpacePool(lambda user_id: space),
         identify=identify,
         warm_user=None,
+        trusted_hosts=("testserver",),
     )
     return TestClient(server.app, headers={"Origin": "http://testserver"})
 

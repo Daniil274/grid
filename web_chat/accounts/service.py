@@ -9,7 +9,9 @@ The rules, all in one place:
 - Signing in gives a session token, kept by the browser in a cookie. A
   session lasts :data:`SESSION_IDLE` past its last use and never more than
   :data:`SESSION_MAX_AGE` in all. Signing out, a password change, disabling the
-  user or a role change ends sessions at once: the next request finds none.
+  user or a role change ends sessions at once: the next request finds none,
+  and a chat or device socket revalidates the session it opened with before
+  acting (see :meth:`web_chat.accounts.http.SessionAuth.revalidator`).
 - A failed sign-in says only that the name or the password is wrong, and a
   missing user costs the same time as a wrong password.
 - The server always keeps an active admin: the last one cannot be disabled or
@@ -51,6 +53,18 @@ class AccountError(ValueError):
 
 class SignInFailed(AccountError):
     pass
+
+
+class SessionRevoked(Exception):
+    """The session a long-lived socket was opened with no longer identifies a user.
+
+    Raised by a revalidation callable (see
+    :meth:`web_chat.accounts.http.SessionAuth.revalidator`) when the cookie
+    that opened a socket opens no session any more: it was signed out,
+    expired, or ended by disabling the account, a role or a password change.
+    The socket is then closed with ``1008`` instead of acting on the user's
+    behalf.
+    """
 
 
 @dataclass(frozen=True)

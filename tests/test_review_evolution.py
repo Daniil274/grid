@@ -100,7 +100,7 @@ def test_a_proposal_travels_to_the_workshop_and_its_verdict_comes_back(tmp_path)
         chat = TestClient(
             WebChatServer(
                 SimpleNamespace(voice_enabled=lambda: False), SpacePool(lambda user_id: None), identify=identify,
-                warm_user=None, reviews=desk,
+                warm_user=None, reviews=desk, trusted_hosts=("testserver",),
             ).app,
             headers={"Origin": "http://testserver"},
         )
@@ -136,6 +136,7 @@ def test_without_the_evolution_loop_sending_is_refused(tmp_path):
         WebChatServer(
             SimpleNamespace(voice_enabled=lambda: False), SpacePool(lambda user_id: None), identify=identify,
             warm_user=None, reviews=ReviewDesk(store, ReviewPolicy, agents=agents),
+            trusted_hosts=("testserver",),
         ).app,
         headers={"Origin": "http://testserver"},
     )
