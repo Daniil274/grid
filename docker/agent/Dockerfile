@@ -15,7 +15,7 @@ FROM node:22-bookworm-slim AS node-tools
 ARG CODEGRAPH_VERSION=1.6.0
 RUN npm install --global "@colbymchenry/codegraph@${CODEGRAPH_VERSION}"
 
-FROM python:3.11-slim
+FROM python:3.15-slim
 
 # The user the container manager runs and execs as. 1000 matches the usual
 # first user of a Linux host, so files the agents create in a bind-mounted
