@@ -93,7 +93,7 @@ def world(monkeypatch):
         def __init__(self, space_, socket, context_id):
             self.space, self.socket, self.context_id = space_, socket, context_id
 
-        async def _start(self, message, system_key, agent_key):
+        async def _start(self, message, system_key, agent_key, *, audio=None):
             if space.refusal:
                 await self.socket.send_json({"type": "busy", "content": space.refusal})
                 return False

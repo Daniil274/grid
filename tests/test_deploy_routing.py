@@ -25,6 +25,11 @@ def test_server_catalog_is_the_main_one_without_host_only_systems():
     server["routing"].pop("systems_dir")
     main["settings"]["action_policy"].pop("policy_file")
     server["settings"]["action_policy"].pop("policy_file")
+    for field in ("providers_file", "models_file"):
+        if field in main or field in server:
+            assert (ROOT / main[field]).resolve() == (ROOT / "deploy" / server[field]).resolve()
+            main.pop(field, None)
+            server.pop(field, None)
     assert server == main
     assert set(server_systems) == set(main_systems) - HOST_ONLY
     for name, system in server_systems.items():
