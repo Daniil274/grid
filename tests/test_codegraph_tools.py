@@ -62,7 +62,9 @@ def test_in_a_container_it_runs_there_in_the_workspace_and_is_ended_there(tmp_pa
     assert "status" in status_call[0] and "--json" in status_call[0]
     assert cmd[:4] == ["docker", "exec", "-w", "/workspace"]
     assert "CODEGRAPH_TELEMETRY=0" in cmd
-    assert cmd[cmd.index("c0ffee") + 1:][:4] == ["timeout", "-k", "5", str(codegraph_tools.CODEGRAPH_TIMEOUT_SECONDS)]
+    timeout_command = cmd[cmd.index("c0ffee") + 1:]
+    assert timeout_command[:3] == ["timeout", "-k", "5"]
+    assert 0 < float(timeout_command[3]) <= codegraph_tools.CODEGRAPH_TIMEOUT_SECONDS
     assert kwargs["stdin"] is codegraph_tools.subprocess.DEVNULL
     assert result.startswith("✅") and "3 files, 10 nodes, 20 edges" in result and "Indexed 3 files" in result
 
@@ -127,3 +129,51 @@ def test_a_locked_index_is_retried_until_the_other_codegraph_lets_go(tmp_path, m
     result = _invoke(_context(tmp_path))
 
     assert result.startswith("\u2705") and not results
+
+
+def test_operator_startup_has_a_short_budget_inside_the_container(tmp_path, monkeypatch):
+    calls = _fake_run(monkeypatch, returncode=124)
+    context = _context(tmp_path, container_id="c0ffee")
+    context.operator_configured = True
+
+    result = _invoke(context)
+
+    cmd, kwargs = calls[0]
+    container_timeout = float(cmd[cmd.index("timeout") + 3])
+    assert 0 < container_timeout <= codegraph_tools.CODEGRAPH_STARTUP_TIMEOUT_SECONDS
+    assert kwargs["timeout"] <= codegraph_tools.CODEGRAPH_STARTUP_TIMEOUT_SECONDS + 10
+    assert "grep_tool" in result and "explicitly" in result
+    assert len(calls) == 1  # No status call after a timed-out sync.
+
+
+def test_sync_lock_retries_and_status_share_one_startup_budget(tmp_path, monkeypatch):
+    clock = [0.0]
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        clock[0] += codegraph_tools.CODEGRAPH_STARTUP_TIMEOUT_SECONDS
+        return SimpleNamespace(returncode=1, stdout="database is locked", stderr="")
+
+    async def no_sleep(_seconds):
+        pass
+
+    monkeypatch.setattr(codegraph_tools.subprocess, "run", run)
+    monkeypatch.setattr(codegraph_tools.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(codegraph_tools.asyncio, "sleep", no_sleep)
+    context = _context(tmp_path, container_id="c0ffee")
+    context.operator_configured = True
+
+    result = _invoke(context)
+
+    assert "did not finish within" in result
+    assert len(calls) == 1
+
+
+def test_out_of_memory_has_an_actionable_fallback_without_a_gc_dump(tmp_path, monkeypatch):
+    _fake_run(monkeypatch, returncode=1, stdout="GC DUMP\nFATAL ERROR: JavaScript heap out of memory")
+
+    result = _invoke(_context(tmp_path))
+
+    assert "codegraph.json" in result and "grep_tool" in result
+    assert "GC DUMP" not in result

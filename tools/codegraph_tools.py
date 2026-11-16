@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -26,6 +27,10 @@ from utils.tool_requirements import Requires
 
 #: A first index of a large repository takes minutes; a sync takes seconds.
 CODEGRAPH_TIMEOUT_SECONDS = 600
+
+# Startup is optional preparation, so a large index must not delay the first
+# model response for minutes. An explicit tool call retains the full budget.
+CODEGRAPH_STARTUP_TIMEOUT_SECONDS = 20
 
 #: No usage statistics and no colour codes in what the agent reads.
 _ENV = {"CODEGRAPH_TELEMETRY": "0", "NO_COLOR": "1"}
@@ -71,7 +76,8 @@ def _status_command() -> List[str]:
     return ["codegraph", "status", "--json", "."]
 
 
-def _run(command: List[str], project: Path, container_id: Optional[str], context: Any) -> subprocess.CompletedProcess:
+def _run(command: List[str], project: Path, container_id: Optional[str], context: Any,
+         timeout_seconds: float = CODEGRAPH_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
     """Run *command* in *project*: in the run's container when there is one."""
     if container_id:
         env = [arg for name, value in _ENV.items() for arg in ("-e", f"{name}={value}")]
@@ -79,7 +85,7 @@ def _run(command: List[str], project: Path, container_id: Optional[str], context
             "docker", "exec", "-w", container_path(str(project), getattr(context.context, "factory", None)),
             *env, container_id,
             # `timeout` ends codegraph inside the container too.
-            "timeout", "-k", "5", str(CODEGRAPH_TIMEOUT_SECONDS), *command,
+            "timeout", "-k", "5", str(timeout_seconds), *command,
         ]
         env_vars = None
     else:
@@ -94,7 +100,7 @@ def _run(command: List[str], project: Path, container_id: Optional[str], context
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=CODEGRAPH_TIMEOUT_SECONDS + 15,
+        timeout=timeout_seconds + 10,
     )
 
 
@@ -116,24 +122,49 @@ async def init_codegraph(context: RunContextWrapper, directory: str = ".") -> st
         project = Path(resolve_agent_path_from_ctx(directory or ".", context))
     except ValueError as exc:
         return f"❌ Error: {exc}"
+    startup = bool(getattr(context, "operator_configured", False))
+    budget = CODEGRAPH_STARTUP_TIMEOUT_SECONDS if startup else CODEGRAPH_TIMEOUT_SECONDS
+    deadline = time.monotonic() + budget
+
+    def timed_out() -> str:
+        message = f"❌ CodeGraph indexing did not finish within {budget} s; CodeGraph is not available."
+        if startup:
+            message += (
+                " Continue with grep_tool/glob_tool/file_read. Exclude virtual environments"
+                " in codegraph.json, or call init_codegraph explicitly for a longer indexing budget."
+            )
+        return message
+
+    async def run(command: List[str]) -> subprocess.CompletedProcess:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, budget)
+        return await asyncio.to_thread(_run, command, project, _container_id(context), context, remaining)
+
     try:
-        result = await asyncio.to_thread(_run, _command(project), project, _container_id(context), context)
+        result = await run(_command(project))
+        for _ in range(_LOCK_RETRIES):
+            if result.returncode == 0 or _LOCKED not in result.stdout + result.stderr:
+                break
+            await asyncio.sleep(min(_LOCK_PAUSE_SECONDS, max(0, deadline - time.monotonic())))
+            result = await run(_command(project))
     except subprocess.TimeoutExpired:
-        return f"❌ CodeGraph indexing did not finish within {CODEGRAPH_TIMEOUT_SECONDS} s; CodeGraph is not available."
+        return timed_out()
     except (OSError, ValueError) as exc:
         return f"❌ CodeGraph is not available: {exc}"
-    for _ in range(_LOCK_RETRIES):
-        if result.returncode == 0 or _LOCKED not in result.stdout + result.stderr:
-            break
-        await asyncio.sleep(_LOCK_PAUSE_SECONDS)
-        result = await asyncio.to_thread(_run, _command(project), project, _container_id(context), context)
     output = sanitize_text_for_agent_from_ctx(_summary(result.stdout + "\n" + result.stderr), context)
     if result.returncode == _TIMED_OUT and _container_id(context):
-        return f"❌ CodeGraph indexing did not finish within {CODEGRAPH_TIMEOUT_SECONDS} s; CodeGraph is not available."
+        return timed_out()
+    if result.returncode != 0 and "heap out of memory" in output.lower():
+        return (
+            "❌ CodeGraph is not available: indexing exhausted JavaScript heap memory. "
+            "Exclude virtual environments and dependencies in codegraph.json, or index a smaller "
+            "source directory. Continue with grep_tool/glob_tool/file_read."
+        )
     if result.returncode != 0:
         return f"❌ CodeGraph is not available (exit {result.returncode}): {output}"
     try:
-        status = await asyncio.to_thread(_run, _status_command(), project, _container_id(context), context)
+        status = await run(_status_command())
     except (subprocess.TimeoutExpired, OSError, ValueError):
         status = None
     return sanitize_text_for_agent_from_ctx(_report(_index_counts(status), project, output), context)
